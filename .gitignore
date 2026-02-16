@@ -1,0 +1,11 @@
+node_modules/
+dist/
+__pycache__/
+.venv/
+venv/
+outputs/
+cache/
+*.tif
+*.tiff
+*.png
+*.jpg
