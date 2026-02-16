@@ -1,0 +1,8 @@
+body { margin: 0; font-family: Inter, sans-serif; }
+.app { display: grid; grid-template-columns: 330px 1fr; height: 100vh; }
+.panel { padding: 12px; border-right: 1px solid #ddd; overflow-y: auto; }
+.toolbar { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 10px; }
+button { padding: 6px 10px; margin: 3px 0; }
+button.active { background: #222; color: #fff; }
+.row { display: grid; grid-template-columns: 1fr auto auto; gap: 5px; align-items: center; }
+.preview { width: 100%; border: 1px solid #ddd; }
