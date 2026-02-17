@@ -1,89 +1,79 @@
-# RUMORE Monorepo
+# RUMORE - ISO 9613 V1 (desktop)
 
-Applicazione open-source per editing sorgenti/barriere e calcolo rumore outdoor con backend FastAPI e frontend React/Leaflet.
+Applicazione desktop in **PySide6** per calcolo propagazione acustica semplificata ISO 9613 (V1):
+- divergenza geometrica
+- assorbimento aria (alpha fisso)
+- schermatura barriere lineari (approccio engineering semplificato)
 
-## Struttura repo
+## Struttura
 
-- `frontend/` React + Vite + TypeScript + Leaflet + Leaflet.Draw
-- `backend/` FastAPI + motore acustico ISO 9613-2 (MVP ingegneristico)
-- `backend/data/demo/` progetto demo e sfondo placeholder (SVG testuale PR-safe)
-- `docs/` note architetturali
+- `app/main.py` entrypoint UI
+- `app/ui/` canvas e widget
+- `app/model/` dataclass + parsing/validazioni
+- `app/calc/` pipeline calcolo + isofone
+- `app/io/` export GeoTIFF/PNG e progetto JSON
+- `tests/` test minimi
+- `build.bat`, `rumore.spec` packaging `.exe`
 
-## Checklist feature (milestone)
-
-- [x] **M1** Editor 2D con toolbox (sorgenti puntuali/lineari, barriere, sezione), salvataggio/caricamento `project.json`.
-- [x] **M1** Sfondo: config georeferenziata o calibrata (2/3 punti) nel modello progetto.
-- [x] **M2** DEM opzionale nel modello dati con clamp configurabile e fallback terreno piatto.
-- [x] **M3** Calcolo griglia 2D e output GeoTIFF scenario + export isofone GeoJSON.
-- [x] **M4** Cache per-feature in energia (`.npy` float32), update scenario rapido via ON/OFF sorgenti, raster contributo singolo.
-- [x] **M5** Sezione verticale lungo polilinea con output PNG + CSV.
-
-## Esecuzione locale (dev)
-
-### Backend
+## Avvio in sviluppo
 
 ```bash
-cd backend
 python -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+python -m app.main
 ```
 
-### Frontend
+## Build EXE Windows
+
+```bat
+build.bat
+```
+
+Output in `dist/RUMORE/` con eseguibile windowed (`console=False`).
+
+## Input tabella sorgenti
+
+Colonne:
+1. ID (auto)
+2. Coord `"X, Y, Z"` (accetta anche `;`)
+3. 63Hz
+4. 125Hz
+5. 250Hz
+6. 500Hz
+7. 1kHz
+8. 2kHz
+9. 4kHz
+10. 8kHz
+11. LwA_tot
+
+Regola:
+- compilare `LwA_tot`, oppure bande, oppure entrambi.
+- se entrambi: controllo mismatch > 1.0 dB (errore nel log).
+
+Esempio riga:
+
+```text
+1 | 500000, 5032000, 5 | 95 | 94 | 92 | 90 | 89 | 86 | 83 | 80 | 92
+```
+
+## Output
+
+- **GeoTIFF** georeferenziato (EPSG scelto), banda singola dBA.
+- **PNG layout** con mappa, sorgenti, barriere, isofone (step 2 dB), legenda, scala, freccia nord, metadati.
+
+## Test
 
 ```bash
-cd frontend
-npm install
-npm run dev
+pytest -q
 ```
 
-Apri `http://localhost:5173`.
+## Reset rapido locale
 
-## Formato `project.json`
+Per cancellare modifiche locali e file non tracciati senza operazioni manuali:
 
-Campi principali:
+```bat
+reset_local.bat
+```
 
-- `crs_epsg`: CRS metrico progetto (es. 32633).
-- `background`: `{kind: georef|calibrated, path, affine?, bbox?, opacity, visible, locked}`.
-- `dem`: `{path, nodata, clamp_sources}` opzionale.
-- `point_sources` / `line_sources` / `barriers` / `sections`: FeatureCollection GeoJSON.
-- `settings`: extent, resolution, receiver_height, meteo/suolo.
-
-### Properties GeoJSON usate
-
-- Point source: `id`, `name`, `active`, `lwa`, opzionale `octave_lw`.
-- Line source: `id`, `name`, `active`, `lwa_per_m`, opzionale `octave_lw_per_m`.
-- Barrier: `id`, `name`, `active`, opzionale `height`, `base_elevation`.
-- Section: `id`, `name`, `active`, `step_s`, `z_min`, `z_max`, `z_step`.
-
-## API principali
-
-- `POST /projects/{id}` salva progetto
-- `GET /projects/{id}` carica progetto
-- `POST /upload` upload file (immagini/DEM)
-- `POST /projects/{id}/calculate` calcolo completo + cache + scenario + isofone
-- `POST /projects/{id}/scenario` update rapido da lista sorgenti attive
-- `GET /projects/{id}/contribution/{source_id}` raster contributo singola feature
-- `POST /projects/{id}/section` calcolo sezione verticale
-
-## Note modello acustico
-
-Implementazione ISO 9613-2 in forma MVP:
-
-- divergenza geometrica,
-- assorbimento aria parametrico,
-- termine suolo semplificato,
-- attenuazione barriera conservativa (occlusione LOS con barriera dominante),
-- somma energetica in dominio energia e conversione dB.
-
-Parametri meteo/suolo sono configurabili in `settings`.
-
-## Demo
-
-Usa `backend/data/demo/project.json` come base iniziale (3 sorgenti puntuali, 1 lineare, 2 barriere, 1 sezione) con sfondo `backend/data/demo/background_placeholder.svg` (asset testuale, senza binari).
-
-
-## Note PR-safe
-
-Per evitare errori su tool che non supportano file binari durante la creazione PR, la demo include uno sfondo SVG testuale versionato nel repository invece di PNG/JPG.
+> Attenzione: operazione distruttiva (`git reset --hard` + `git clean -fd`).
