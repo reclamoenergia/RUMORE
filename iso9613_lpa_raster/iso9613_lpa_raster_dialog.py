@@ -17,9 +17,14 @@ from qgis.PyQt.QtWidgets import (
     QDoubleSpinBox,
 )
 from qgis.core import (
-    QgsMapLayerProxyModel,
-    QgsWkbTypes,
+    QgsFeature,
+    QgsFeatureRequest,
     QgsFieldProxyModel,
+    QgsMapLayerProxyModel,
+    QgsProject,
+    QgsRasterLayer,
+    QgsVectorLayer,
+    QgsWkbTypes,
 )
 from qgis.gui import QgsFieldComboBox, QgsMapLayerComboBox
 
@@ -53,6 +58,10 @@ class ISO9613LpaRasterDialog(QDialog):
 
         self.src_combo.layerChanged.connect(self._on_source_changed)
 
+        self.chk_use_selected_sources = QCheckBox("Usa solo sorgenti selezionate")
+        self.chk_use_selected_sources.setChecked(False)
+        layout.addRow("Selezione sorgenti", self.chk_use_selected_sources)
+
         self.h_rec = self._make_spin(0.0, 1000.0, 4.0)
         layout.addRow("h_rec (m)", self.h_rec)
 
@@ -80,6 +89,38 @@ class ISO9613LpaRasterDialog(QDialog):
         out_row.addWidget(self.output_edit)
         out_row.addWidget(out_btn)
         layout.addRow("Output GeoTIFF", out_row)
+
+        self.chk_add_raster_to_project = QCheckBox("Aggiungi output raster al progetto")
+        self.chk_add_raster_to_project.setChecked(True)
+        layout.addRow("Import raster", self.chk_add_raster_to_project)
+
+        self.chk_run_receptors = QCheckBox("Esegui anche calcolo su ricettori")
+        self.chk_run_receptors.setChecked(False)
+        layout.addRow("Ricettori", self.chk_run_receptors)
+
+        self.receptors_combo = QgsMapLayerComboBox()
+        self.receptors_combo.setFilters(QgsMapLayerProxyModel.PointLayer)
+        self.receptors_combo.setEnabled(False)
+        self.chk_run_receptors.toggled.connect(self.receptors_combo.setEnabled)
+        layout.addRow("Layer ricettori", self.receptors_combo)
+
+        rec_out_row = QHBoxLayout()
+        self.receptors_output_edit = QLineEdit()
+        self.receptors_output_edit.setEnabled(False)
+        self.rec_out_btn = QPushButton("Sfoglia…")
+        self.rec_out_btn.setEnabled(False)
+        self.chk_run_receptors.toggled.connect(self.receptors_output_edit.setEnabled)
+        self.chk_run_receptors.toggled.connect(self.rec_out_btn.setEnabled)
+        self.rec_out_btn.clicked.connect(self._pick_receptors_output)
+        rec_out_row.addWidget(self.receptors_output_edit)
+        rec_out_row.addWidget(self.rec_out_btn)
+        layout.addRow("Output ricettori", rec_out_row)
+
+        self.chk_add_receptors_to_project = QCheckBox("Aggiungi output ricettori al progetto")
+        self.chk_add_receptors_to_project.setChecked(True)
+        self.chk_add_receptors_to_project.setEnabled(False)
+        self.chk_run_receptors.toggled.connect(self.chk_add_receptors_to_project.setEnabled)
+        layout.addRow("Import ricettori", self.chk_add_receptors_to_project)
 
         self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         self.buttons.button(QDialogButtonBox.Ok).setText("Esegui")
@@ -112,6 +153,56 @@ class ISO9613LpaRasterDialog(QDialog):
         if path:
             self.output_edit.setText(path)
 
+    def _pick_receptors_output(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Salva output ricettori",
+            "",
+            "GeoPackage (*.gpkg);;ESRI Shapefile (*.shp)",
+        )
+        if path:
+            self.receptors_output_edit.setText(path)
+
+    def _selected_sources_layer(self, src):
+        if not self.chk_use_selected_sources.isChecked():
+            return src
+
+        if not isinstance(src, QgsVectorLayer):
+            QMessageBox.warning(self, "Selezione sorgenti", "Layer sorgenti non selezionabile: uso tutte le sorgenti.")
+            return src
+
+        total = src.featureCount()
+        selected_ids = src.selectedFeatureIds()
+        if not selected_ids:
+            QMessageBox.warning(self, "Selezione sorgenti", "Nessuna sorgente selezionata → uso tutte.")
+            return src
+
+        geom_type = QgsWkbTypes.displayString(src.wkbType())
+        crs_authid = src.crs().authid() or "EPSG:4326"
+        memory_uri = f"{geom_type}?crs={crs_authid}"
+        selected_layer = QgsVectorLayer(memory_uri, "selected_sources", "memory")
+        dp = selected_layer.dataProvider()
+        dp.addAttributes(src.fields())
+        selected_layer.updateFields()
+
+        request = QgsFeatureRequest().setFilterFids(selected_ids)
+        selected_feats = []
+        for feat in src.getFeatures(request):
+            new_feat = QgsFeature(selected_layer.fields())
+            new_feat.setGeometry(feat.geometry())
+            new_feat.setAttributes(feat.attributes())
+            selected_feats.append(new_feat)
+
+        dp.addFeatures(selected_feats)
+        selected_layer.updateExtents()
+
+        QMessageBox.information(
+            self,
+            "Selezione sorgenti",
+            f"Uso {len(selected_feats)} sorgenti selezionate su {total} totali.",
+        )
+        return selected_layer
+
     def _run(self):
         dem = self.dem_combo.currentLayer()
         src = self.src_combo.currentLayer()
@@ -126,12 +217,14 @@ class ISO9613LpaRasterDialog(QDialog):
             return
 
         if not out_path:
-            QMessageBox.critical(self, "Errore", "Seleziona un file output.")
+            QMessageBox.critical(self, "Errore", "Seleziona un file output raster.")
             return
+
+        src_to_use = self._selected_sources_layer(src)
 
         params = {
             "DEM": dem,
-            "SOURCES": src,
+            "SOURCES": src_to_use,
             "FIELD_NAME": None,
             "FIELD_HSRC": self.hsrc_field.currentField(),
             "FIELD_LWA": self.lwa_field.currentField(),
@@ -145,7 +238,51 @@ class ISO9613LpaRasterDialog(QDialog):
         }
 
         try:
-            processing.run("iso9613_lpa_raster:iso9613_lpa_raster_v1", params)
+            raster_result = processing.run("iso9613_lpa_raster:iso9613_lpa_raster_v1", params)
+            raster_out_path = raster_result.get("OUTPUT", out_path)
+
+            if self.chk_add_raster_to_project.isChecked():
+                rl = QgsRasterLayer(raster_out_path, "LpA ISO9613")
+                if rl.isValid():
+                    QgsProject.instance().addMapLayer(rl)
+                else:
+                    QMessageBox.warning(self, "Import raster", "Output raster creato ma layer non valido.")
+
+            if self.chk_run_receptors.isChecked():
+                receptors_layer = self.receptors_combo.currentLayer()
+                receptors_output = self.receptors_output_edit.text().strip()
+                if receptors_layer is None:
+                    QMessageBox.critical(self, "Errore", "Seleziona il layer ricettori.")
+                    return
+                if not receptors_output:
+                    QMessageBox.critical(self, "Errore", "Seleziona un file output per i ricettori.")
+                    return
+
+                receptors_params = {
+                    "DEM": dem,
+                    "SOURCES": src_to_use,
+                    "FIELD_NAME": None,
+                    "FIELD_HSRC": self.hsrc_field.currentField(),
+                    "FIELD_LWA": self.lwa_field.currentField(),
+                    "RECEPTORS": receptors_layer,
+                    "H_REC": self.h_rec.value(),
+                    "BAF": self.baf.value(),
+                    "ALPHA_ATM": self.alpha.value(),
+                    "ENABLE_GROUND": self.enable_ground.isChecked(),
+                    "G": self.g_value.value(),
+                    "D_MIN": self.d_min.value(),
+                    "OUTPUT": receptors_output,
+                }
+                receptors_result = processing.run("iso9613_lpa_raster:iso9613_lpa_receptors", receptors_params)
+                receptors_out_path = receptors_result.get("OUTPUT", receptors_output)
+
+                if self.chk_add_receptors_to_project.isChecked():
+                    vl = QgsVectorLayer(receptors_out_path, "LpA Receptors", "ogr")
+                    if vl.isValid():
+                        QgsProject.instance().addMapLayer(vl)
+                    else:
+                        QMessageBox.warning(self, "Import ricettori", "Output ricettori creato ma layer non valido.")
+
             QMessageBox.information(self, "Completato", "Calcolo completato con successo.")
             self.accept()
         except Exception as exc:

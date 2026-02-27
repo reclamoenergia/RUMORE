@@ -4,6 +4,12 @@ Plugin QGIS 3.x per calcolare un raster GeoTIFF `LpA_dB` da sorgenti puntuali co
 
 ## Funzionalità principali
 
+## Nuove funzioni (v0.2.0)
+
+- **Auto-load output raster in progetto** dal dialog tramite checkbox "Aggiungi output raster al progetto".
+- **Uso sole sorgenti selezionate** dal layer input (con fallback automatico a tutte se non c'è selezione o layer non selezionabile).
+- **Nuovo algoritmo Processing** `Acoustics -> ISO9613 LpA Receptors (v1)` per calcolo su layer di ricettori puntuali con output vettoriale e campo `LpA_dB`.
+
 - Algoritmo in **Processing Toolbox**: `Acoustics -> ISO9613 LpA Raster (v1)`.
 - Plugin classico con menu/toolbar e dialog minimale per avviare il calcolo.
 - Input:
