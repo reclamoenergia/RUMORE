@@ -1,0 +1,16 @@
+[general]
+name=ISO9613 LpA Raster (v1)
+qgisMinimumVersion=3.22
+description=Calcolo raster LpA (dB) da sorgenti puntuali su DEM con distanza 3D (orografia esplicita), Aatm manuale e Agr semplificato. Limitazioni v1: nessuna barriera, Agr non full ISO 9613.
+version=1.0.0
+author=Your Name
+email=author@example.com
+about=Plugin QGIS con algoritmo Processing per calcolare LpA su griglia DEM (GeoTIFF float32) con maschera NoData e dominio BAF (bbox unione buffer sorgenti).
+tracker=
+repository=
+category=Raster
+icon=icons/icon.png
+experimental=False
+deprecated=False
+homepage=
+tags=acoustics,noise,iso9613,dem,raster
