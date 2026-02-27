@@ -177,9 +177,8 @@ class ISO9613LpaRasterDialog(QDialog):
             QMessageBox.warning(self, "Selezione sorgenti", "Nessuna sorgente selezionata → uso tutte.")
             return src
 
-        geom_type = QgsWkbTypes.displayString(src.wkbType())
         crs_authid = src.crs().authid() or "EPSG:4326"
-        memory_uri = f"{geom_type}?crs={crs_authid}"
+        memory_uri = f"Point?crs={crs_authid}"
         selected_layer = QgsVectorLayer(memory_uri, "selected_sources", "memory")
         dp = selected_layer.dataProvider()
         dp.addAttributes(src.fields())
@@ -216,6 +215,12 @@ class ISO9613LpaRasterDialog(QDialog):
             QMessageBox.critical(self, "Errore", "Il layer sorgenti deve essere Point.")
             return
 
+        field_hsrc = self.hsrc_field.currentField().strip()
+        field_lwa = self.lwa_field.currentField().strip()
+        if not field_hsrc or not field_lwa:
+            QMessageBox.critical(self, "Errore", "Seleziona i campi h_src e LwA prima di eseguire.")
+            return
+
         if not out_path:
             QMessageBox.critical(self, "Errore", "Seleziona un file output raster.")
             return
@@ -226,8 +231,8 @@ class ISO9613LpaRasterDialog(QDialog):
             "DEM": dem,
             "SOURCES": src_to_use,
             "FIELD_NAME": None,
-            "FIELD_HSRC": self.hsrc_field.currentField(),
-            "FIELD_LWA": self.lwa_field.currentField(),
+            "FIELD_HSRC": field_hsrc,
+            "FIELD_LWA": field_lwa,
             "H_REC": self.h_rec.value(),
             "BAF": self.baf.value(),
             "ALPHA_ATM": self.alpha.value(),
@@ -262,8 +267,8 @@ class ISO9613LpaRasterDialog(QDialog):
                     "DEM": dem,
                     "SOURCES": src_to_use,
                     "FIELD_NAME": None,
-                    "FIELD_HSRC": self.hsrc_field.currentField(),
-                    "FIELD_LWA": self.lwa_field.currentField(),
+                    "FIELD_HSRC": field_hsrc,
+                    "FIELD_LWA": field_lwa,
                     "RECEPTORS": receptors_layer,
                     "H_REC": self.h_rec.value(),
                     "BAF": self.baf.value(),
