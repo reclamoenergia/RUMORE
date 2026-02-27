@@ -249,13 +249,14 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
         rec_fields = QgsFields(rec_source.fields())
         rec_fields.append(QgsField("LpA_dB", QVariant.Double))
 
+        output_crs = rec_source.sourceCrs() if rec_source.sourceCrs().isValid() else dem_layer.crs()
         sink, dest_id = self.parameterAsSink(
             parameters,
             self.OUTPUT,
             context,
             rec_fields,
             rec_source.wkbType(),
-            rec_source.sourceCrs(),
+            output_crs,
         )
         if sink is None:
             raise QgsProcessingException("Impossibile creare output ricettori.")
