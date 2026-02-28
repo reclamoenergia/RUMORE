@@ -5,6 +5,8 @@ import math
 import numpy as np
 from osgeo import gdal
 
+from ..core.iso9613_core import compute_lpa_from_sources_grid
+
 from qgis.core import (
     QgsCoordinateTransform,
     QgsFeature,
@@ -313,10 +315,6 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
         total_tiles = ntr * ntc
         done = 0
 
-        d0 = 200.0
-        agr_max = 3.0
-        k_g = agr_max * g_value
-
         for r0 in range(0, win_rows, self.TILE_SIZE):
             r1 = min(r0 + self.TILE_SIZE, win_rows)
             for c0 in range(0, win_cols, self.TILE_SIZE):
@@ -336,29 +334,22 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
                 x = gt[0] + (cc + 0.5) * gt[1] + (rr + 0.5) * gt[2]
                 y = gt[3] + (cc + 0.5) * gt[4] + (rr + 0.5) * gt[5]
 
-                p_tot = np.zeros((r1 - r0, c1 - c0), dtype=np.float64)
                 z_r = dem_tile + h_rec
-
-                for _, x_s, y_s, z_s, lwa in valid_sources:
-                    dxy = np.hypot(x - x_s, y - y_s)
-                    dz = z_r - z_s
-                    d = np.sqrt(dxy * dxy + dz * dz)
-                    d = np.maximum(d, d_min)
-
-                    adiv = 20.0 * np.log10(d) + 11.0
-                    aatm = alpha_atm * d
-                    if enable_ground:
-                        agr = np.clip(k_g * (1.0 - np.exp(-d / d0)), 0.0, agr_max)
-                    else:
-                        agr = 0.0
-
-                    lpi = lwa - (adiv + aatm + agr)
-                    p_tot += np.power(10.0, lpi / 10.0)
+                lpa_tile = compute_lpa_from_sources_grid(
+                    x_grid=x,
+                    y_grid=y,
+                    z_rec=z_r,
+                    sources=valid_sources,
+                    alpha_atm=alpha_atm,
+                    enable_ground=enable_ground,
+                    g_value=g_value,
+                    d_min=d_min,
+                    nodata_mask=nodata_tile,
+                )
 
                 out_tile = np.full((r1 - r0, c1 - c0), self.OUTPUT_NODATA, dtype=np.float32)
-                positive = p_tot > 0.0
-                calc_mask = positive & (~nodata_tile)
-                out_tile[calc_mask] = (10.0 * np.log10(p_tot[calc_mask])).astype(np.float32)
+                calc_mask = ~np.isnan(lpa_tile)
+                out_tile[calc_mask] = lpa_tile[calc_mask].astype(np.float32)
 
                 out_band.WriteArray(out_tile, xoff=c0, yoff=r0)
 

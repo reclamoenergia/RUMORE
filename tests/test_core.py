@@ -1,28 +1,54 @@
-from app.model.entities import Source, energy_sum
-from app.model.parsing import parse_coord_string
+import numpy as np
+
+from iso9613_lpa_raster.core.iso9613_core import (
+    compute_adiv,
+    compute_agr_simplified,
+    compute_lpa_for_receptors_points,
+)
 
 
-def test_parse_coordinate_string():
-    x, y, z = parse_coord_string("100.5, 200.0, 3")
-    assert (x, y, z) == (100.5, 200.0, 3.0)
-    x2, y2, z2 = parse_coord_string("100.5;200.0;3")
-    assert (x2, y2, z2) == (100.5, 200.0, 3.0)
+def test_adiv_100m():
+    assert abs(float(compute_adiv(100.0)) - 51.0) < 1e-6
 
 
-def test_energy_sum_two_sources():
-    out = energy_sum([50.0, 50.0])
-    assert abs(out - 53.01) < 0.02
-
-
-def test_lwa_bands_consistency_threshold():
-    s = Source(
-        source_id=1,
-        x=0,
-        y=0,
-        z=1,
-        bands={63: 90, 125: 90, 250: 90, 500: 90, 1000: 90, 2000: 90, 4000: 90, 8000: 90},
-        lwa_total=110,
+def test_single_source_flat():
+    rec_xy = np.array([[100.0, 0.0]], dtype=np.float64)
+    rec_z = np.array([0.0], dtype=np.float64)
+    sources = [(0.0, 0.0, 0.0, 100.0)]
+    out = compute_lpa_for_receptors_points(
+        rec_xy=rec_xy,
+        rec_z=rec_z,
+        sources=sources,
+        alpha_atm=0.0,
+        enable_ground=False,
+        g_value=0.5,
+        d_min=1.0,
     )
-    ok, msg = s.validate_lwa_consistency(1.0)
-    assert not ok
-    assert msg is not None
+    assert abs(float(out[0]) - 49.0) < 1e-6
+
+
+def test_energy_sum():
+    rec_xy = np.array([[100.0, 0.0]], dtype=np.float64)
+    rec_z = np.array([0.0], dtype=np.float64)
+    one = [(0.0, 0.0, 0.0, 100.0)]
+    two = [(0.0, 0.0, 0.0, 100.0), (0.0, 0.0, 0.0, 100.0)]
+
+    out_one = compute_lpa_for_receptors_points(rec_xy, rec_z, one, 0.0, False, 0.5, 1.0)
+    out_two = compute_lpa_for_receptors_points(rec_xy, rec_z, two, 0.0, False, 0.5, 1.0)
+    assert abs(float(out_two[0] - out_one[0]) - 3.0103) < 1e-3
+
+
+def test_d_min_clamp():
+    rec_xy = np.array([[0.0, 0.0]], dtype=np.float64)
+    rec_z = np.array([0.0], dtype=np.float64)
+    sources = [(0.0, 0.0, 0.0, 100.0)]
+    out = compute_lpa_for_receptors_points(rec_xy, rec_z, sources, 0.0, False, 0.5, 1.0)
+    assert np.isfinite(out[0])
+
+
+def test_ground_toggle():
+    d = 1000.0
+    off = compute_agr_simplified(False, 0.8, d)
+    on = compute_agr_simplified(True, 0.8, d)
+    assert off == 0.0
+    assert on > 0.0

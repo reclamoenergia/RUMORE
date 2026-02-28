@@ -3,6 +3,8 @@
 import math
 
 import numpy as np
+
+from ..core.iso9613_core import compute_lpa_for_receptors_points
 from osgeo import gdal
 
 from qgis.core import (
@@ -270,9 +272,6 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
         nodata_receptors = 0
         skipped_by_baf = 0
 
-        d0 = 200.0
-        agr_max = 3.0
-        k_g = agr_max * g_value
 
         for rec_feat in rec_source.getFeatures():
             if feedback.isCanceled():
@@ -299,24 +298,19 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
                 nodata_receptors += 1
                 feedback.pushWarning(f"Ricettore {rec_feat.id()} su DEM NoData/fuori raster: LpA_dB = NULL")
             else:
-                z_r = z_rec_dem + h_rec
-                p_tot = 0.0
-                for _, x_s, y_s, z_s, lwa in sources:
-                    dxy = math.hypot(rec_pt.x() - x_s, rec_pt.y() - y_s)
-                    dz = z_r - z_s
-                    d = math.sqrt(dxy * dxy + dz * dz)
-                    d = max(d, d_min)
-                    adiv = 20.0 * math.log10(d) + 11.0
-                    aatm = alpha_atm * d
-                    if enable_ground:
-                        agr = max(0.0, min(k_g * (1.0 - math.exp(-d / d0)), agr_max))
-                    else:
-                        agr = 0.0
-                    lpi = lwa - (adiv + aatm + agr)
-                    p_tot += math.pow(10.0, lpi / 10.0)
-
-                if p_tot > 0.0:
-                    lpa_db = 10.0 * math.log10(p_tot)
+                rec_xy = np.array([[rec_pt.x(), rec_pt.y()]], dtype=np.float64)
+                rec_z = np.array([z_rec_dem + h_rec], dtype=np.float64)
+                lpa_vals = compute_lpa_for_receptors_points(
+                    rec_xy=rec_xy,
+                    rec_z=rec_z,
+                    sources=sources,
+                    alpha_atm=alpha_atm,
+                    enable_ground=enable_ground,
+                    g_value=g_value,
+                    d_min=d_min,
+                )
+                if np.isfinite(lpa_vals[0]):
+                    lpa_db = float(lpa_vals[0])
 
             out_feat = QgsFeature(rec_fields)
             out_feat.setGeometry(rec_feat.geometry())

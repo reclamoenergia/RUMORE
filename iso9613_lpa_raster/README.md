@@ -65,6 +65,26 @@ Plugin QGIS 3.x per calcolare un raster GeoTIFF `LpA_dB` da sorgenti puntuali co
 2. **DEM con pendenza/gradino**
    - Confrontare output con caso planimetrico: i risultati devono variare per effetto della quota (`z_r - z_s`).
 
+
+## Core calcolo testabile (senza QGIS)
+
+Il motore numerico ISO 9613 è stato separato in `iso9613_lpa_raster/core/iso9613_core.py` (solo `math` + `numpy`, nessun `qgis.*`).
+Il wrapper QGIS/Processing resta invariato come interfaccia pubblica (provider id, nomi algoritmo, parametri).
+
+### Esecuzione test core
+
+Con `pytest`:
+
+```bash
+pytest -q tests/test_core.py tests/test_regressions.py
+```
+
+Oppure senza pytest:
+
+```bash
+python -m pytest -q tests/test_core.py tests/test_regressions.py
+```
+
 ## Dipendenze
 
 - QGIS 3.22+
