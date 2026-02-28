@@ -5,11 +5,18 @@ import math
 import numpy as np
 from osgeo import gdal
 
-from ..core.iso9613_core import compute_lpa_from_sources_grid
+from ..core.iso9613_core import (
+    BANDS,
+    WIND_TURBINE_STD,
+    build_source_spectrum,
+    compute_lpa_from_sources_grid,
+    nearest_wind_bin,
+    reconstruct_lwa_total_from_unweighted,
+    to_unweighted_band_lw,
+)
 
 from qgis.core import (
     QgsCoordinateTransform,
-    QgsFeature,
     QgsFeatureSource,
     QgsField,
     QgsGeometry,
@@ -17,14 +24,16 @@ from qgis.core import (
     QgsProcessingAlgorithm,
     QgsProcessingException,
     QgsProcessingParameterBoolean,
+    QgsProcessingParameterEnum,
     QgsProcessingParameterFeatureSource,
     QgsProcessingParameterField,
     QgsProcessingParameterFileDestination,
     QgsProcessingParameterNumber,
     QgsProcessingParameterRasterLayer,
+    QgsProcessingParameterString,
     QgsProject,
     QgsUnitTypes,
-    Qgis,
+    QgsWkbTypes,
 )
 
 
@@ -40,16 +49,38 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
     ENABLE_GROUND = "ENABLE_GROUND"
     G = "G"
     D_MIN = "D_MIN"
+    USE_OCTAVE_BANDS = "USE_OCTAVE_BANDS"
+    SPECTRUM_MODE = "SPECTRUM_MODE"
+    WIND_BIN = "WIND_BIN"
+    OFFSETS = "OFFSETS"
     OUTPUT = "OUTPUT"
 
     TILE_SIZE = 512
     OUTPUT_NODATA = -9999.0
 
+    SPECTRUM_MODES = [
+        "Flat (from LwA)",
+        "Wind turbine (standard)",
+        "Use band fields (if provided)",
+        "Custom offsets",
+    ]
+
+    FIELD_LW_MAP = {
+        63: "FIELD_LW_63",
+        125: "FIELD_LW_125",
+        250: "FIELD_LW_250",
+        500: "FIELD_LW_500",
+        1000: "FIELD_LW_1000",
+        2000: "FIELD_LW_2000",
+        4000: "FIELD_LW_4000",
+        8000: "FIELD_LW_8000",
+    }
+
     def name(self):
         return "iso9613_lpa_raster_v1"
 
     def displayName(self):
-        return "ISO9613 LpA Raster (v1)"
+        return "ISO9613 LpA Raster (v2)"
 
     def group(self):
         return "Acoustics"
@@ -67,9 +98,7 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
         return ISO9613LpaRasterAlgorithm()
 
     def initAlgorithm(self, config=None):
-        self.addParameter(
-            QgsProcessingParameterRasterLayer(self.DEM, "DEM (elevazione, metri)")
-        )
+        self.addParameter(QgsProcessingParameterRasterLayer(self.DEM, "DEM (elevazione, metri)"))
         self.addParameter(
             QgsProcessingParameterFeatureSource(
                 self.SOURCES,
@@ -100,6 +129,50 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
                 "Campo LwA (dB re 1 pW)",
                 parentLayerParameterName=self.SOURCES,
                 type=QgsProcessingParameterField.Numeric,
+            )
+        )
+        for freq, field_name in self.FIELD_LW_MAP.items():
+            self.addParameter(
+                QgsProcessingParameterField(
+                    field_name,
+                    f"Campo Lw {freq} Hz (opzionale)",
+                    parentLayerParameterName=self.SOURCES,
+                    type=QgsProcessingParameterField.Numeric,
+                    optional=True,
+                )
+            )
+
+        self.addParameter(
+            QgsProcessingParameterBoolean(
+                self.USE_OCTAVE_BANDS,
+                "USE_OCTAVE_BANDS",
+                defaultValue=False,
+            )
+        )
+        self.addParameter(
+            QgsProcessingParameterEnum(
+                self.SPECTRUM_MODE,
+                "SPECTRUM_MODE",
+                options=self.SPECTRUM_MODES,
+                defaultValue=0,
+            )
+        )
+        self.addParameter(
+            QgsProcessingParameterNumber(
+                self.WIND_BIN,
+                "WIND_BIN (4..14)",
+                type=QgsProcessingParameterNumber.Integer,
+                defaultValue=10,
+                minValue=4,
+                maxValue=14,
+            )
+        )
+        self.addParameter(
+            QgsProcessingParameterString(
+                self.OFFSETS,
+                "OFFSETS (es. 63:-3;125:-2;...)",
+                optional=True,
+                defaultValue="",
             )
         )
         self.addParameter(
@@ -167,6 +240,10 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
         field_name = self.parameterAsString(parameters, self.FIELD_NAME, context)
         field_hsrc = self.parameterAsString(parameters, self.FIELD_HSRC, context)
         field_lwa = self.parameterAsString(parameters, self.FIELD_LWA, context)
+        use_bands = self.parameterAsBool(parameters, self.USE_OCTAVE_BANDS, context)
+        spectrum_idx = self.parameterAsEnum(parameters, self.SPECTRUM_MODE, context)
+        wind_bin = self.parameterAsInt(parameters, self.WIND_BIN, context)
+        offsets_text = self.parameterAsString(parameters, self.OFFSETS, context)
         h_rec = self.parameterAsDouble(parameters, self.H_REC, context)
         baf = self.parameterAsDouble(parameters, self.BAF, context)
         alpha_atm = self.parameterAsDouble(parameters, self.ALPHA_ATM, context)
@@ -196,6 +273,15 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
         if not self._is_numeric_field(fields[h_field]) or not self._is_numeric_field(fields[lwa_field]):
             raise QgsProcessingException("I campi h_src e LwA devono essere numerici.")
 
+        band_field_names = {freq: self.parameterAsString(parameters, key, context) for freq, key in self.FIELD_LW_MAP.items()}
+        has_complete_band_fields = all(name and fields.lookupField(name) >= 0 for name in band_field_names.values())
+
+        mode_key = self._resolve_mode_key(spectrum_idx)
+        if has_complete_band_fields and use_bands:
+            mode_key = "BANDS_FROM_FIELDS"
+
+        offsets = self._parse_offsets(offsets_text)
+
         dem_path = dem_layer.source()
         dem_ds = gdal.Open(dem_path, gdal.GA_ReadOnly)
         if dem_ds is None:
@@ -213,11 +299,10 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
 
         transform = None
         if src_source.sourceCrs().isValid() and src_source.sourceCrs() != dem_layer.crs():
-            transform = QgsCoordinateTransform(
-                src_source.sourceCrs(), dem_layer.crs(), QgsProject.instance()
-            )
+            transform = QgsCoordinateTransform(src_source.sourceCrs(), dem_layer.crs(), QgsProject.instance())
 
         all_sources = []
+        source_spectra = []
         n_total = 0
         for feat in src_source.getFeatures():
             if feedback.isCanceled():
@@ -237,7 +322,25 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
             except (TypeError, ValueError):
                 feedback.pushWarning(f"Sorgente {name}: h_src/LwA non numerici, scartata.")
                 continue
+
+            lw_band_fields = None
+            if has_complete_band_fields:
+                lw_band_fields = {}
+                try:
+                    for freq, f_name in band_field_names.items():
+                        lw_band_fields[freq] = float(feat[f_name])
+                except (TypeError, ValueError):
+                    lw_band_fields = None
+
+            lw_band = build_source_spectrum(
+                mode=mode_key,
+                lwa_total=lwa,
+                lw_band_fields=lw_band_fields,
+                wind_bin=wind_bin,
+                user_offsets_db=offsets,
+            )
             all_sources.append((name, float(pt.x()), float(pt.y()), h_src, lwa))
+            source_spectra.append({"name": name, "x": float(pt.x()), "y": float(pt.y()), "h_src": h_src, "lwa": lwa, "lw_band": lw_band})
 
         if not all_sources:
             raise QgsProcessingException("Nessuna sorgente valida trovata.")
@@ -259,8 +362,9 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
         dem_window = dem_window.astype(np.float64, copy=False)
 
         valid_sources = []
+        valid_spectra = []
         discarded = 0
-        for name, x_s, y_s, h_src, lwa in all_sources:
+        for (name, x_s, y_s, h_src, lwa), src_spec in zip(all_sources, source_spectra):
             c_s, r_s = self._xy_to_colrow(x_s, y_s, gt)
             if c_s < col_min or c_s > col_max or r_s < row_min or r_s > row_max:
                 feedback.pushWarning(f"Sorgente {name} fuori DEM/window, scartata.")
@@ -278,6 +382,7 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
                 continue
             z_s = z_dem_val + h_src
             valid_sources.append((name, x_s, y_s, z_s, lwa))
+            valid_spectra.append({"x": x_s, "y": y_s, "z": z_s, "lwa": lwa, "lw_band": src_spec["lw_band"]})
 
         if not valid_sources:
             raise QgsProcessingException("Tutte le sorgenti sono state scartate.")
@@ -294,6 +399,15 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
             f"Parametri: h_rec={h_rec}, BAF={baf}, alpha={alpha_atm}, "
             f"abilita_suolo={enable_ground}, G={g_value}, d_min={d_min}"
         )
+        if use_bands:
+            if mode_key == "WIND_TURBINE_STD":
+                used_bin = nearest_wind_bin(wind_bin)
+                recon = self._reconstruct_lwa_turbine(used_bin, offsets)
+                feedback.pushInfo(f"Spettro turbine standard: wind_bin richiesto={wind_bin}, usato={used_bin}, LwA_tot={recon:.2f} dB")
+            elif mode_key == "BANDS_FROM_FIELDS":
+                feedback.pushInfo("Spettro per sorgente: uso campi per bande.")
+            else:
+                feedback.pushInfo("Spettro per sorgente: spettro piatto derivato da LwA.")
 
         driver = gdal.GetDriverByName("GTiff")
         out_ds = driver.Create(output_path, win_cols, win_rows, 1, gdal.GDT_Float32)
@@ -345,6 +459,8 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
                     g_value=g_value,
                     d_min=d_min,
                     nodata_mask=nodata_tile,
+                    use_bands=use_bands,
+                    sources_spectra=valid_spectra,
                 )
 
                 out_tile = np.full((r1 - r0, c1 - c0), self.OUTPUT_NODATA, dtype=np.float32)
@@ -361,6 +477,38 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
         dem_ds = None
 
         return {self.OUTPUT: output_path}
+
+    @staticmethod
+    def _resolve_mode_key(idx):
+        if idx == 1:
+            return "WIND_TURBINE_STD"
+        if idx == 2:
+            return "BANDS_FROM_FIELDS"
+        return "FLAT_FROM_LWA"
+
+    @staticmethod
+    def _parse_offsets(offsets_text):
+        if not offsets_text:
+            return {}
+        out = {}
+        for chunk in offsets_text.split(";"):
+            if not chunk.strip() or ":" not in chunk:
+                continue
+            f_txt, v_txt = chunk.split(":", 1)
+            try:
+                out[int(f_txt.strip())] = float(v_txt.strip())
+            except ValueError:
+                continue
+        return out
+
+    @staticmethod
+    def _reconstruct_lwa_turbine(wind_bin, offsets):
+        lwa_band = {
+            freq: WIND_TURBINE_STD[wind_bin][freq] + float(offsets.get(freq, 0.0))
+            for freq in BANDS
+        }
+        lw_band = to_unweighted_band_lw(lwa_band)
+        return reconstruct_lwa_total_from_unweighted(lw_band)
 
     @staticmethod
     def _is_numeric_field(field: QgsField):
@@ -414,6 +562,3 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
         row_min = max(0, min(r0, r1))
         row_max = min(max_rows - 1, max(r0, r1))
         return col_min, col_max, row_min, row_max
-
-
-from qgis.core import QgsWkbTypes  # noqa: E402

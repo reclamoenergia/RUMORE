@@ -18,7 +18,7 @@ class ISO9613LpaRasterPlugin:
 
     def initGui(self):
         icon_path = os.path.join(os.path.dirname(__file__), "icons", "icon.png")
-        self.action = QAction(QIcon(icon_path), "ISO9613 LpA Raster (v1)", self.iface.mainWindow())
+        self.action = QAction(QIcon(icon_path), "ISO9613 LpA Raster (v2)", self.iface.mainWindow())
         self.action.triggered.connect(self.run)
 
         self.iface.addPluginToMenu("&ISO9613 LpA Raster", self.action)
