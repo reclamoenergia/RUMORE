@@ -4,26 +4,34 @@ import math
 
 import numpy as np
 
-from ..core.iso9613_core import compute_lpa_for_receptors_points
+from ..core.iso9613_core import (
+    BANDS,
+    WIND_TURBINE_STD,
+    build_source_spectrum,
+    compute_lpa_for_receptors_points,
+    nearest_wind_bin,
+    reconstruct_lwa_total_from_unweighted,
+    to_unweighted_band_lw,
+)
 from osgeo import gdal
 
 from qgis.core import (
     QgsCoordinateTransform,
     QgsFeature,
     QgsFeatureSink,
-    QgsFeatureSource,
-    QgsField,
     QgsFields,
     QgsGeometry,
     QgsProcessing,
     QgsProcessingAlgorithm,
     QgsProcessingException,
     QgsProcessingParameterBoolean,
+    QgsProcessingParameterEnum,
     QgsProcessingParameterFeatureSink,
     QgsProcessingParameterFeatureSource,
     QgsProcessingParameterField,
     QgsProcessingParameterNumber,
     QgsProcessingParameterRasterLayer,
+    QgsProcessingParameterString,
     QgsProject,
     QgsRectangle,
     QgsUnitTypes,
@@ -45,13 +53,35 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
     ENABLE_GROUND = "ENABLE_GROUND"
     G = "G"
     D_MIN = "D_MIN"
+    USE_OCTAVE_BANDS = "USE_OCTAVE_BANDS"
+    SPECTRUM_MODE = "SPECTRUM_MODE"
+    WIND_BIN = "WIND_BIN"
+    OFFSETS = "OFFSETS"
     OUTPUT = "OUTPUT"
+
+    SPECTRUM_MODES = [
+        "Flat (from LwA)",
+        "Wind turbine (standard)",
+        "Use band fields (if provided)",
+        "Custom offsets",
+    ]
+
+    FIELD_LW_MAP = {
+        63: "FIELD_LW_63",
+        125: "FIELD_LW_125",
+        250: "FIELD_LW_250",
+        500: "FIELD_LW_500",
+        1000: "FIELD_LW_1000",
+        2000: "FIELD_LW_2000",
+        4000: "FIELD_LW_4000",
+        8000: "FIELD_LW_8000",
+    }
 
     def name(self):
         return "iso9613_lpa_receptors"
 
     def displayName(self):
-        return "ISO9613 LpA Receptors (v1)"
+        return "ISO9613 LpA Receptors (v2)"
 
     def group(self):
         return "Acoustics"
@@ -99,13 +129,32 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
                 type=QgsProcessingParameterField.Numeric,
             )
         )
+        for freq, field_name in self.FIELD_LW_MAP.items():
+            self.addParameter(
+                QgsProcessingParameterField(
+                    field_name,
+                    f"Campo Lw {freq} Hz (opzionale)",
+                    parentLayerParameterName=self.SOURCES,
+                    type=QgsProcessingParameterField.Numeric,
+                    optional=True,
+                )
+            )
+
+        self.addParameter(QgsProcessingParameterFeatureSource(self.RECEPTORS, "Ricettori puntuali", [QgsProcessing.TypeVectorPoint]))
+        self.addParameter(QgsProcessingParameterBoolean(self.USE_OCTAVE_BANDS, "USE_OCTAVE_BANDS", defaultValue=False))
+        self.addParameter(QgsProcessingParameterEnum(self.SPECTRUM_MODE, "SPECTRUM_MODE", options=self.SPECTRUM_MODES, defaultValue=0))
         self.addParameter(
-            QgsProcessingParameterFeatureSource(
-                self.RECEPTORS,
-                "Ricettori puntuali",
-                [QgsProcessing.TypeVectorPoint],
+            QgsProcessingParameterNumber(
+                self.WIND_BIN,
+                "WIND_BIN (4..14)",
+                type=QgsProcessingParameterNumber.Integer,
+                defaultValue=10,
+                minValue=4,
+                maxValue=14,
             )
         )
+        self.addParameter(QgsProcessingParameterString(self.OFFSETS, "OFFSETS (es. 63:-3;125:-2;...)", optional=True, defaultValue=""))
+
         self.addParameter(
             QgsProcessingParameterNumber(
                 self.H_REC,
@@ -132,13 +181,7 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
                 defaultValue=0.0,
             )
         )
-        self.addParameter(
-            QgsProcessingParameterBoolean(
-                self.ENABLE_GROUND,
-                "Abilita attenuazione suolo semplificata",
-                defaultValue=False,
-            )
-        )
+        self.addParameter(QgsProcessingParameterBoolean(self.ENABLE_GROUND, "Abilita attenuazione suolo semplificata", defaultValue=False))
         self.addParameter(
             QgsProcessingParameterNumber(
                 self.G,
@@ -167,6 +210,10 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
         field_name = self.parameterAsString(parameters, self.FIELD_NAME, context)
         field_hsrc = self.parameterAsString(parameters, self.FIELD_HSRC, context)
         field_lwa = self.parameterAsString(parameters, self.FIELD_LWA, context)
+        use_bands = self.parameterAsBool(parameters, self.USE_OCTAVE_BANDS, context)
+        spectrum_idx = self.parameterAsEnum(parameters, self.SPECTRUM_MODE, context)
+        wind_bin = self.parameterAsInt(parameters, self.WIND_BIN, context)
+        offsets = self._parse_offsets(self.parameterAsString(parameters, self.OFFSETS, context))
         h_rec = self.parameterAsDouble(parameters, self.H_REC, context)
         alpha_atm = self.parameterAsDouble(parameters, self.ALPHA_ATM, context)
         enable_ground = self.parameterAsBool(parameters, self.ENABLE_GROUND, context)
@@ -201,6 +248,12 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
         if not fields[h_field].isNumeric() or not fields[lwa_field].isNumeric():
             raise QgsProcessingException("I campi h_src e LwA devono essere numerici.")
 
+        band_field_names = {freq: self.parameterAsString(parameters, key, context) for freq, key in self.FIELD_LW_MAP.items()}
+        has_complete_band_fields = all(name and fields.lookupField(name) >= 0 for name in band_field_names.values())
+        mode_key = self._resolve_mode_key(spectrum_idx)
+        if has_complete_band_fields and use_bands:
+            mode_key = "BANDS_FROM_FIELDS"
+
         dem_path = dem_layer.source()
         dem_ds = gdal.Open(dem_path, gdal.GA_ReadOnly)
         if dem_ds is None:
@@ -217,6 +270,7 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
             transform_src = QgsCoordinateTransform(src_source.sourceCrs(), dem_layer.crs(), QgsProject.instance())
 
         sources = []
+        sources_spectra = []
         for feat in src_source.getFeatures():
             if feedback.isCanceled():
                 return {self.OUTPUT: None}
@@ -235,14 +289,42 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
                 feedback.pushWarning(f"Sorgente {name}: h_src/LwA non numerici, scartata.")
                 continue
 
+            lw_band_fields = None
+            if has_complete_band_fields:
+                lw_band_fields = {}
+                try:
+                    for freq, f_name in band_field_names.items():
+                        lw_band_fields[freq] = float(feat[f_name])
+                except (TypeError, ValueError):
+                    lw_band_fields = None
+
             z_dem = self._sample_dem_nearest(dem_band, gt, pt.x(), pt.y())
             if z_dem is None or self._is_nodata_value(z_dem, dem_nodata):
                 feedback.pushWarning(f"Sorgente {name} su NoData DEM/fuori raster, scartata.")
                 continue
             sources.append((name, pt.x(), pt.y(), z_dem + h_src, lwa))
+            sources_spectra.append(
+                {
+                    "x": pt.x(),
+                    "y": pt.y(),
+                    "z": z_dem + h_src,
+                    "lwa": lwa,
+                    "lw_band": build_source_spectrum(mode_key, lwa, lw_band_fields, wind_bin, offsets),
+                }
+            )
 
         if not sources:
             raise QgsProcessingException("Nessuna sorgente valida trovata.")
+
+        if use_bands:
+            if mode_key == "WIND_TURBINE_STD":
+                used = nearest_wind_bin(wind_bin)
+                recon = self._reconstruct_lwa_turbine(used, offsets)
+                feedback.pushInfo(f"Spettro turbine standard: wind_bin richiesto={wind_bin}, usato={used}, LwA_tot={recon:.2f} dB")
+            elif mode_key == "BANDS_FROM_FIELDS":
+                feedback.pushInfo("Spettro per sorgente: uso campi per bande.")
+            else:
+                feedback.pushInfo("Spettro per sorgente: spettro piatto derivato da LwA.")
 
         domain = None
         if baf_value is not None:
@@ -252,14 +334,7 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
         rec_fields.append(QgsField("LpA_dB", QVariant.Double))
 
         output_crs = rec_source.sourceCrs() if rec_source.sourceCrs().isValid() else dem_layer.crs()
-        sink, dest_id = self.parameterAsSink(
-            parameters,
-            self.OUTPUT,
-            context,
-            rec_fields,
-            rec_source.wkbType(),
-            output_crs,
-        )
+        sink, dest_id = self.parameterAsSink(parameters, self.OUTPUT, context, rec_fields, rec_source.wkbType(), output_crs)
         if sink is None:
             raise QgsProcessingException("Impossibile creare output ricettori.")
 
@@ -271,7 +346,6 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
         done = 0
         nodata_receptors = 0
         skipped_by_baf = 0
-
 
         for rec_feat in rec_source.getFeatures():
             if feedback.isCanceled():
@@ -308,6 +382,8 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
                     enable_ground=enable_ground,
                     g_value=g_value,
                     d_min=d_min,
+                    use_bands=use_bands,
+                    sources_spectra=sources_spectra,
                 )
                 if np.isfinite(lpa_vals[0]):
                     lpa_db = float(lpa_vals[0])
@@ -329,6 +405,35 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
 
         dem_ds = None
         return {self.OUTPUT: dest_id}
+
+    @staticmethod
+    def _resolve_mode_key(idx):
+        if idx == 1:
+            return "WIND_TURBINE_STD"
+        if idx == 2:
+            return "BANDS_FROM_FIELDS"
+        return "FLAT_FROM_LWA"
+
+    @staticmethod
+    def _parse_offsets(offsets_text):
+        if not offsets_text:
+            return {}
+        out = {}
+        for chunk in offsets_text.split(";"):
+            if not chunk.strip() or ":" not in chunk:
+                continue
+            f_txt, v_txt = chunk.split(":", 1)
+            try:
+                out[int(f_txt.strip())] = float(v_txt.strip())
+            except ValueError:
+                continue
+        return out
+
+    @staticmethod
+    def _reconstruct_lwa_turbine(wind_bin, offsets):
+        lwa_band = {freq: WIND_TURBINE_STD[wind_bin][freq] + float(offsets.get(freq, 0.0)) for freq in BANDS}
+        lw_band = to_unweighted_band_lw(lwa_band)
+        return reconstruct_lwa_total_from_unweighted(lw_band)
 
     @staticmethod
     def _compute_domain_bbox(sources, baf):

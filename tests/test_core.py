@@ -1,9 +1,14 @@
 import numpy as np
 
 from iso9613_lpa_raster.core.iso9613_core import (
+    A_WEIGHT_DB,
+    BANDS,
+    WIND_TURBINE_STD,
+    build_source_spectrum,
     compute_adiv,
     compute_agr_simplified,
     compute_lpa_for_receptors_points,
+    reconstruct_lwa_total_from_unweighted,
 )
 
 
@@ -52,3 +57,21 @@ def test_ground_toggle():
     on = compute_agr_simplified(True, 0.8, d)
     assert off == 0.0
     assert on > 0.0
+
+
+def test_a_weight_reconstruction():
+    lw_flat = {freq: 95.0 for freq in BANDS}
+    reconstructed = reconstruct_lwa_total_from_unweighted(lw_flat)
+    expected = 10.0 * np.log10(np.sum([10.0 ** ((95.0 + A_WEIGHT_DB[f]) / 10.0) for f in BANDS]))
+    assert abs(reconstructed - expected) < 1e-9
+
+
+def test_flat_from_lwa():
+    lw_band = build_source_spectrum("FLAT_FROM_LWA", lwa_total=100.0)
+    reconstructed = reconstruct_lwa_total_from_unweighted(lw_band)
+    assert abs(reconstructed - 100.0) <= 0.01
+
+
+def test_turbine_preset_exists():
+    assert 10 in WIND_TURBINE_STD
+    assert all(freq in WIND_TURBINE_STD[10] for freq in BANDS)

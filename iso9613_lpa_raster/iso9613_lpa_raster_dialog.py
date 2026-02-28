@@ -33,7 +33,7 @@ class ISO9613LpaRasterDialog(QDialog):
     def __init__(self, iface, parent=None):
         super().__init__(parent)
         self.iface = iface
-        self.setWindowTitle("ISO9613 LpA Raster (v1)")
+        self.setWindowTitle("ISO9613 LpA Raster (v2)")
         self.setMinimumWidth(520)
         self._build_ui()
 
@@ -73,6 +73,24 @@ class ISO9613LpaRasterDialog(QDialog):
 
         self.d_min = self._make_spin(0.001, 1000.0, 1.0)
         layout.addRow("d_min (m)", self.d_min)
+
+        self.use_bands = QCheckBox("Usa bande d’ottava")
+        self.use_bands.setChecked(False)
+        layout.addRow("Bande", self.use_bands)
+
+        self.spectrum_combo = QComboBox()
+        self.spectrum_combo.addItems(["Flat", "Aerogeneratore standard", "Campi per banda (se disponibili)", "Offset personalizzati"])
+        layout.addRow("Spettro", self.spectrum_combo)
+
+        self.wind_bin = self._make_spin(4, 14, 10, 0)
+        layout.addRow("Wind bin", self.wind_bin)
+
+        self.offsets_edit = QLineEdit()
+        self.offsets_edit.setPlaceholderText("63:-3;125:-2;250:0;500:1;1000:2;2000:1;4000:-1;8000:-2")
+        self.offsets_edit.setEnabled(False)
+        layout.addRow("Offsets", self.offsets_edit)
+
+        self.spectrum_combo.currentIndexChanged.connect(self._on_spectrum_mode_changed)
 
         self.enable_ground = QCheckBox("Abilita suolo semplificato")
         layout.addRow("Suolo", self.enable_ground)
@@ -129,6 +147,7 @@ class ISO9613LpaRasterDialog(QDialog):
         layout.addRow(self.buttons)
 
         self._on_source_changed(self.src_combo.currentLayer())
+        self._on_spectrum_mode_changed(self.spectrum_combo.currentIndex())
 
     @staticmethod
     def _make_spin(min_v, max_v, default_v, decimals=3):
@@ -142,6 +161,11 @@ class ISO9613LpaRasterDialog(QDialog):
     def _on_source_changed(self, layer):
         self.hsrc_field.setLayer(layer)
         self.lwa_field.setLayer(layer)
+
+
+    def _on_spectrum_mode_changed(self, idx):
+        self.wind_bin.setEnabled(idx == 1)
+        self.offsets_edit.setEnabled(idx == 3)
 
     def _pick_output(self):
         path, _ = QFileDialog.getSaveFileName(
@@ -239,6 +263,10 @@ class ISO9613LpaRasterDialog(QDialog):
             "ENABLE_GROUND": self.enable_ground.isChecked(),
             "G": self.g_value.value(),
             "D_MIN": self.d_min.value(),
+            "USE_OCTAVE_BANDS": self.use_bands.isChecked(),
+            "SPECTRUM_MODE": self.spectrum_combo.currentIndex(),
+            "WIND_BIN": int(self.wind_bin.value()),
+            "OFFSETS": self.offsets_edit.text().strip(),
             "OUTPUT": out_path,
         }
 
@@ -276,6 +304,10 @@ class ISO9613LpaRasterDialog(QDialog):
                     "ENABLE_GROUND": self.enable_ground.isChecked(),
                     "G": self.g_value.value(),
                     "D_MIN": self.d_min.value(),
+                    "USE_OCTAVE_BANDS": self.use_bands.isChecked(),
+                    "SPECTRUM_MODE": self.spectrum_combo.currentIndex(),
+                    "WIND_BIN": int(self.wind_bin.value()),
+                    "OFFSETS": self.offsets_edit.text().strip(),
                     "OUTPUT": receptors_output,
                 }
                 receptors_result = processing.run("iso9613_lpa_raster:iso9613_lpa_receptors", receptors_params)
