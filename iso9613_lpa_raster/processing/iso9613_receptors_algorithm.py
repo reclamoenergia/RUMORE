@@ -5,13 +5,8 @@ import math
 import numpy as np
 
 from ..core.iso9613_core import (
-    BANDS,
-    WIND_TURBINE_STD,
     build_source_spectrum,
     compute_lpa_for_receptors_points,
-    nearest_wind_bin,
-    reconstruct_lwa_total_from_unweighted,
-    to_unweighted_band_lw,
 )
 from osgeo import gdal
 
@@ -55,15 +50,16 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
     D_MIN = "D_MIN"
     USE_OCTAVE_BANDS = "USE_OCTAVE_BANDS"
     SPECTRUM_MODE = "SPECTRUM_MODE"
-    WIND_BIN = "WIND_BIN"
     OFFSETS = "OFFSETS"
+    TEMPERATURE_C = "TEMPERATURE_C"
+    RELATIVE_HUMIDITY = "RELATIVE_HUMIDITY"
+    PRESSURE_KPA = "PRESSURE_KPA"
     OUTPUT = "OUTPUT"
 
     SPECTRUM_MODES = [
         "Flat (from LwA)",
-        "Wind turbine (standard)",
+        "Aerogeneratore (shape scaled to LwA)",
         "Use band fields (if provided)",
-        "Custom offsets",
     ]
 
     FIELD_LW_MAP = {
@@ -81,7 +77,7 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
         return "iso9613_lpa_receptors"
 
     def displayName(self):
-        return "ISO9613 LpA Receptors (v2)"
+        return "ISO9613 LpA Receptors (v2.1)"
 
     def group(self):
         return "Acoustics"
@@ -143,16 +139,6 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
         self.addParameter(QgsProcessingParameterFeatureSource(self.RECEPTORS, "Ricettori puntuali", [QgsProcessing.TypeVectorPoint]))
         self.addParameter(QgsProcessingParameterBoolean(self.USE_OCTAVE_BANDS, "USE_OCTAVE_BANDS", defaultValue=False))
         self.addParameter(QgsProcessingParameterEnum(self.SPECTRUM_MODE, "SPECTRUM_MODE", options=self.SPECTRUM_MODES, defaultValue=0))
-        self.addParameter(
-            QgsProcessingParameterNumber(
-                self.WIND_BIN,
-                "WIND_BIN (4..14)",
-                type=QgsProcessingParameterNumber.Integer,
-                defaultValue=10,
-                minValue=4,
-                maxValue=14,
-            )
-        )
         self.addParameter(QgsProcessingParameterString(self.OFFSETS, "OFFSETS (es. 63:-3;125:-2;...)", optional=True, defaultValue=""))
 
         self.addParameter(
@@ -179,6 +165,33 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
                 "alpha_atm (dB/m)",
                 type=QgsProcessingParameterNumber.Double,
                 defaultValue=0.0,
+            )
+        )
+        self.addParameter(
+            QgsProcessingParameterNumber(
+                self.TEMPERATURE_C,
+                "Temperatura aria (°C)",
+                type=QgsProcessingParameterNumber.Double,
+                defaultValue=10.0,
+            )
+        )
+        self.addParameter(
+            QgsProcessingParameterNumber(
+                self.RELATIVE_HUMIDITY,
+                "Umidità relativa (%)",
+                type=QgsProcessingParameterNumber.Double,
+                defaultValue=70.0,
+                minValue=0.1,
+                maxValue=100.0,
+            )
+        )
+        self.addParameter(
+            QgsProcessingParameterNumber(
+                self.PRESSURE_KPA,
+                "Pressione atmosferica (kPa)",
+                type=QgsProcessingParameterNumber.Double,
+                defaultValue=101.325,
+                minValue=10.0,
             )
         )
         self.addParameter(QgsProcessingParameterBoolean(self.ENABLE_GROUND, "Abilita attenuazione suolo semplificata", defaultValue=False))
@@ -212,13 +225,15 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
         field_lwa = self.parameterAsString(parameters, self.FIELD_LWA, context)
         use_bands = self.parameterAsBool(parameters, self.USE_OCTAVE_BANDS, context)
         spectrum_idx = self.parameterAsEnum(parameters, self.SPECTRUM_MODE, context)
-        wind_bin = self.parameterAsInt(parameters, self.WIND_BIN, context)
         offsets = self._parse_offsets(self.parameterAsString(parameters, self.OFFSETS, context))
         h_rec = self.parameterAsDouble(parameters, self.H_REC, context)
         alpha_atm = self.parameterAsDouble(parameters, self.ALPHA_ATM, context)
         enable_ground = self.parameterAsBool(parameters, self.ENABLE_GROUND, context)
         g_value = self.parameterAsDouble(parameters, self.G, context)
         d_min = self.parameterAsDouble(parameters, self.D_MIN, context)
+        temperature_c = self.parameterAsDouble(parameters, self.TEMPERATURE_C, context)
+        relative_humidity = self.parameterAsDouble(parameters, self.RELATIVE_HUMIDITY, context)
+        pressure_kpa = self.parameterAsDouble(parameters, self.PRESSURE_KPA, context)
 
         baf_value = None
         if self.BAF in parameters and parameters[self.BAF] not in (None, ""):
@@ -309,7 +324,7 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
                     "y": pt.y(),
                     "z": z_dem + h_src,
                     "lwa": lwa,
-                    "lw_band": build_source_spectrum(mode_key, lwa, lw_band_fields, wind_bin, offsets),
+                    "lw_band": build_source_spectrum(lwa_total=lwa, mode=mode_key, lw_band_fields=lw_band_fields, user_offsets_db=offsets),
                 }
             )
 
@@ -317,14 +332,11 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
             raise QgsProcessingException("Nessuna sorgente valida trovata.")
 
         if use_bands:
-            if mode_key == "WIND_TURBINE_STD":
-                used = nearest_wind_bin(wind_bin)
-                recon = self._reconstruct_lwa_turbine(used, offsets)
-                feedback.pushInfo(f"Spettro turbine standard: wind_bin richiesto={wind_bin}, usato={used}, LwA_tot={recon:.2f} dB")
-            elif mode_key == "BANDS_FROM_FIELDS":
-                feedback.pushInfo("Spettro per sorgente: uso campi per bande.")
-            else:
-                feedback.pushInfo("Spettro per sorgente: spettro piatto derivato da LwA.")
+            feedback.pushInfo(
+                f"Mode bande: preset={self.SPECTRUM_MODES[spectrum_idx]}, "
+                f"T={temperature_c:.2f}°C, RH={relative_humidity:.1f}%, p={pressure_kpa:.3f} kPa"
+            )
+            feedback.pushInfo("alpha_atm manuale ignorato in modalità bande.")
 
         domain = None
         if baf_value is not None:
@@ -384,6 +396,9 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
                     d_min=d_min,
                     use_bands=use_bands,
                     sources_spectra=sources_spectra,
+                    temperature_c=temperature_c,
+                    relative_humidity=relative_humidity,
+                    pressure_kpa=pressure_kpa,
                 )
                 if np.isfinite(lpa_vals[0]):
                     lpa_db = float(lpa_vals[0])
@@ -409,7 +424,7 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
     @staticmethod
     def _resolve_mode_key(idx):
         if idx == 1:
-            return "WIND_TURBINE_STD"
+            return "TURBINE_SHAPE_SCALED"
         if idx == 2:
             return "BANDS_FROM_FIELDS"
         return "FLAT_FROM_LWA"
@@ -428,12 +443,6 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
             except ValueError:
                 continue
         return out
-
-    @staticmethod
-    def _reconstruct_lwa_turbine(wind_bin, offsets):
-        lwa_band = {freq: WIND_TURBINE_STD[wind_bin][freq] + float(offsets.get(freq, 0.0)) for freq in BANDS}
-        lw_band = to_unweighted_band_lw(lwa_band)
-        return reconstruct_lwa_total_from_unweighted(lw_band)
 
     @staticmethod
     def _compute_domain_bbox(sources, baf):

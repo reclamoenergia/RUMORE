@@ -6,13 +6,9 @@ import numpy as np
 from osgeo import gdal
 
 from ..core.iso9613_core import (
-    BANDS,
-    WIND_TURBINE_STD,
     build_source_spectrum,
     compute_lpa_from_sources_grid,
-    nearest_wind_bin,
     reconstruct_lwa_total_from_unweighted,
-    to_unweighted_band_lw,
 )
 
 from qgis.core import (
@@ -51,8 +47,10 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
     D_MIN = "D_MIN"
     USE_OCTAVE_BANDS = "USE_OCTAVE_BANDS"
     SPECTRUM_MODE = "SPECTRUM_MODE"
-    WIND_BIN = "WIND_BIN"
     OFFSETS = "OFFSETS"
+    TEMPERATURE_C = "TEMPERATURE_C"
+    RELATIVE_HUMIDITY = "RELATIVE_HUMIDITY"
+    PRESSURE_KPA = "PRESSURE_KPA"
     OUTPUT = "OUTPUT"
 
     TILE_SIZE = 512
@@ -60,9 +58,8 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
 
     SPECTRUM_MODES = [
         "Flat (from LwA)",
-        "Wind turbine (standard)",
+        "Aerogeneratore (shape scaled to LwA)",
         "Use band fields (if provided)",
-        "Custom offsets",
     ]
 
     FIELD_LW_MAP = {
@@ -80,7 +77,7 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
         return "iso9613_lpa_raster_v1"
 
     def displayName(self):
-        return "ISO9613 LpA Raster (v2)"
+        return "ISO9613 LpA Raster (v2.1)"
 
     def group(self):
         return "Acoustics"
@@ -158,16 +155,6 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
             )
         )
         self.addParameter(
-            QgsProcessingParameterNumber(
-                self.WIND_BIN,
-                "WIND_BIN (4..14)",
-                type=QgsProcessingParameterNumber.Integer,
-                defaultValue=10,
-                minValue=4,
-                maxValue=14,
-            )
-        )
-        self.addParameter(
             QgsProcessingParameterString(
                 self.OFFSETS,
                 "OFFSETS (es. 63:-3;125:-2;...)",
@@ -198,6 +185,33 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
                 "alpha_atm (dB/m)",
                 type=QgsProcessingParameterNumber.Double,
                 defaultValue=0.0,
+            )
+        )
+        self.addParameter(
+            QgsProcessingParameterNumber(
+                self.TEMPERATURE_C,
+                "Temperatura aria (°C)",
+                type=QgsProcessingParameterNumber.Double,
+                defaultValue=10.0,
+            )
+        )
+        self.addParameter(
+            QgsProcessingParameterNumber(
+                self.RELATIVE_HUMIDITY,
+                "Umidità relativa (%)",
+                type=QgsProcessingParameterNumber.Double,
+                defaultValue=70.0,
+                minValue=0.1,
+                maxValue=100.0,
+            )
+        )
+        self.addParameter(
+            QgsProcessingParameterNumber(
+                self.PRESSURE_KPA,
+                "Pressione atmosferica (kPa)",
+                type=QgsProcessingParameterNumber.Double,
+                defaultValue=101.325,
+                minValue=10.0,
             )
         )
         self.addParameter(
@@ -242,11 +256,13 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
         field_lwa = self.parameterAsString(parameters, self.FIELD_LWA, context)
         use_bands = self.parameterAsBool(parameters, self.USE_OCTAVE_BANDS, context)
         spectrum_idx = self.parameterAsEnum(parameters, self.SPECTRUM_MODE, context)
-        wind_bin = self.parameterAsInt(parameters, self.WIND_BIN, context)
         offsets_text = self.parameterAsString(parameters, self.OFFSETS, context)
         h_rec = self.parameterAsDouble(parameters, self.H_REC, context)
         baf = self.parameterAsDouble(parameters, self.BAF, context)
         alpha_atm = self.parameterAsDouble(parameters, self.ALPHA_ATM, context)
+        temperature_c = self.parameterAsDouble(parameters, self.TEMPERATURE_C, context)
+        relative_humidity = self.parameterAsDouble(parameters, self.RELATIVE_HUMIDITY, context)
+        pressure_kpa = self.parameterAsDouble(parameters, self.PRESSURE_KPA, context)
         enable_ground = self.parameterAsBool(parameters, self.ENABLE_GROUND, context)
         g_value = self.parameterAsDouble(parameters, self.G, context)
         d_min = self.parameterAsDouble(parameters, self.D_MIN, context)
@@ -333,10 +349,9 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
                     lw_band_fields = None
 
             lw_band = build_source_spectrum(
-                mode=mode_key,
                 lwa_total=lwa,
+                mode=mode_key,
                 lw_band_fields=lw_band_fields,
-                wind_bin=wind_bin,
                 user_offsets_db=offsets,
             )
             all_sources.append((name, float(pt.x()), float(pt.y()), h_src, lwa))
@@ -400,14 +415,14 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
             f"abilita_suolo={enable_ground}, G={g_value}, d_min={d_min}"
         )
         if use_bands:
-            if mode_key == "WIND_TURBINE_STD":
-                used_bin = nearest_wind_bin(wind_bin)
-                recon = self._reconstruct_lwa_turbine(used_bin, offsets)
-                feedback.pushInfo(f"Spettro turbine standard: wind_bin richiesto={wind_bin}, usato={used_bin}, LwA_tot={recon:.2f} dB")
-            elif mode_key == "BANDS_FROM_FIELDS":
-                feedback.pushInfo("Spettro per sorgente: uso campi per bande.")
-            else:
-                feedback.pushInfo("Spettro per sorgente: spettro piatto derivato da LwA.")
+            feedback.pushInfo(
+                f"Mode bande: preset={self.SPECTRUM_MODES[spectrum_idx]}, "
+                f"T={temperature_c:.2f}°C, RH={relative_humidity:.1f}%, p={pressure_kpa:.3f} kPa"
+            )
+            feedback.pushInfo("alpha_atm manuale ignorato in modalità bande.")
+            for src in valid_spectra[:5]:
+                lwa_rec = reconstruct_lwa_total_from_unweighted(src["lw_band"])
+                feedback.pushInfo(f"Sorgente @({src['x']:.2f},{src['y']:.2f}): LwA user={src['lwa']:.2f}, check ricostruzione={lwa_rec:.2f}")
 
         driver = gdal.GetDriverByName("GTiff")
         out_ds = driver.Create(output_path, win_cols, win_rows, 1, gdal.GDT_Float32)
@@ -461,6 +476,9 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
                     nodata_mask=nodata_tile,
                     use_bands=use_bands,
                     sources_spectra=valid_spectra,
+                    temperature_c=temperature_c,
+                    relative_humidity=relative_humidity,
+                    pressure_kpa=pressure_kpa,
                 )
 
                 out_tile = np.full((r1 - r0, c1 - c0), self.OUTPUT_NODATA, dtype=np.float32)
@@ -481,7 +499,7 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
     @staticmethod
     def _resolve_mode_key(idx):
         if idx == 1:
-            return "WIND_TURBINE_STD"
+            return "TURBINE_SHAPE_SCALED"
         if idx == 2:
             return "BANDS_FROM_FIELDS"
         return "FLAT_FROM_LWA"
@@ -500,15 +518,6 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
             except ValueError:
                 continue
         return out
-
-    @staticmethod
-    def _reconstruct_lwa_turbine(wind_bin, offsets):
-        lwa_band = {
-            freq: WIND_TURBINE_STD[wind_bin][freq] + float(offsets.get(freq, 0.0))
-            for freq in BANDS
-        }
-        lw_band = to_unweighted_band_lw(lwa_band)
-        return reconstruct_lwa_total_from_unweighted(lw_band)
 
     @staticmethod
     def _is_numeric_field(field: QgsField):

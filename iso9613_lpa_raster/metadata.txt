@@ -1,8 +1,8 @@
 [general]
-name=ISO9613 LpA Raster (v2)
+name=ISO9613 LpA Raster (v2.1)
 qgisMinimumVersion=3.22
 description=Calcolo ISO9613 LpA raster + ricettori: Version 2 – Octave bands support, auto-load output, uso sorgenti selezionate, output vettoriale con LpA_dB.
-version=0.2.0
+version=0.2.1
 author=Your Name
 email=author@example.com
 about=Plugin QGIS con due algoritmi Processing: raster LpA su DEM e ricettori puntuali con campo LpA_dB; Version 2 – Octave bands support, auto-import output e subset sorgenti selezionate.

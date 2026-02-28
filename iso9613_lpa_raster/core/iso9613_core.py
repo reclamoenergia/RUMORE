@@ -15,11 +15,22 @@ A_WEIGHT_DB = {
     8000: -1.1,
 }
 
-WIND_TURBINE_STD = {
-    8: {63: 84.0, 125: 88.0, 250: 92.0, 500: 95.0, 1000: 96.0, 2000: 94.0, 4000: 90.0, 8000: 84.0},
-    10: {63: 87.0, 125: 91.0, 250: 95.0, 500: 98.0, 1000: 100.0, 2000: 98.0, 4000: 94.0, 8000: 88.0},
-    12: {63: 89.0, 125: 93.0, 250: 97.0, 500: 100.0, 1000: 102.0, 2000: 100.0, 4000: 96.0, 8000: 90.0},
+# Template relativo di forma spettrale aerogeneratore (offset in dB).
+# Viene sempre riscalato sul totale LwA utente tramite build_band_lw_from_shape_scaled_to_LwA.
+WIND_TURBINE_SHAPE_DB = {
+    63: -8.0,
+    125: -5.0,
+    250: -2.5,
+    500: 0.0,
+    1000: 1.0,
+    2000: 0.0,
+    4000: -3.0,
+    8000: -8.0,
 }
+
+ISO9613_REFERENCE_T_K = 293.15
+ISO9613_TRIPLE_POINT_T_K = 273.16
+ISO9613_REFERENCE_P_PA = 101325.0
 
 
 def _source_tuple(src):
@@ -71,32 +82,63 @@ def _flat_spectrum_from_lwa_total(lwa_total):
     return {freq: base for freq in BANDS}
 
 
-def _nearest_wind_bin(wind_bin):
-    available = sorted(WIND_TURBINE_STD.keys())
-    if wind_bin in WIND_TURBINE_STD:
-        return int(wind_bin)
-    return min(available, key=lambda b: abs(b - int(wind_bin)))
+def build_band_lw_from_shape_scaled_to_LwA(lwa_total, shape_db, a_weight_db=None):
+    a_weight = A_WEIGHT_DB if a_weight_db is None else a_weight_db
+    k_sum = np.sum([np.power(10.0, (float(shape_db[freq]) + float(a_weight[freq])) / 10.0) for freq in BANDS])
+    k = 10.0 * np.log10(k_sum)
+    s = float(lwa_total) - k
+    return {freq: s + float(shape_db[freq]) for freq in BANDS}
 
 
-def nearest_wind_bin(wind_bin):
-    return _nearest_wind_bin(wind_bin)
-
-
-def build_source_spectrum(mode, lwa_total, lw_band_fields=None, wind_bin=None, user_offsets_db=None):
+def build_source_spectrum(lwa_total, mode, lw_band_fields=None, user_offsets_db=None):
     offsets = _normalize_offsets(user_offsets_db)
+
     if lw_band_fields and all(int(freq) in lw_band_fields for freq in BANDS):
-        return {freq: float(lw_band_fields[freq]) + offsets.get(freq, 0.0) for freq in BANDS}
+        base = {freq: float(lw_band_fields[freq]) for freq in BANDS}
+    elif mode == "TURBINE_SHAPE_SCALED":
+        base = build_band_lw_from_shape_scaled_to_LwA(lwa_total, WIND_TURBINE_SHAPE_DB, A_WEIGHT_DB)
+    else:
+        base = _flat_spectrum_from_lwa_total(lwa_total)
 
-    if mode == "WIND_TURBINE_STD":
-        selected_bin = _nearest_wind_bin(10 if wind_bin is None else wind_bin)
-        lwa_band = {
-            freq: float(WIND_TURBINE_STD[selected_bin][freq]) + offsets.get(freq, 0.0)
-            for freq in BANDS
-        }
-        return to_unweighted_band_lw(lwa_band)
+    return {freq: base[freq] + offsets.get(freq, 0.0) for freq in BANDS}
 
-    lw_band = _flat_spectrum_from_lwa_total(lwa_total)
-    return {freq: lw_band[freq] + offsets.get(freq, 0.0) for freq in BANDS}
+
+def saturation_vapor_pressure(T_K):
+    exponent = -6.8346 * np.power(ISO9613_TRIPLE_POINT_T_K / T_K, 1.261) + 4.6151
+    return ISO9613_REFERENCE_P_PA * np.power(10.0, exponent)
+
+
+def molar_concentration_water_vapor(relative_humidity, p_sat_pa, p_atm_pa):
+    rh = np.clip(float(relative_humidity), 0.1, 100.0)
+    return (rh / 100.0) * (p_sat_pa / p_atm_pa)
+
+
+def relaxation_frequencies_oxygen_nitrogen(T_K, RH, p_atm_pa):
+    h = molar_concentration_water_vapor(RH, saturation_vapor_pressure(T_K), p_atm_pa)
+    p_ratio = p_atm_pa / ISO9613_REFERENCE_P_PA
+    t_ratio = T_K / ISO9613_REFERENCE_T_K
+
+    fr_o = p_ratio * (24.0 + 4.04e4 * h * (0.02 + h) / (0.391 + h))
+    fr_n = p_ratio * np.power(t_ratio, -0.5) * (9.0 + 280.0 * h * np.exp(-4.170 * (np.power(t_ratio, -1.0 / 3.0) - 1.0)))
+    return float(fr_o), float(fr_n)
+
+
+def alpha_iso9613_1(f_hz, T_C, RH_percent, p_kPa=101.325):
+    f = float(f_hz)
+    t_k = float(T_C) + 273.15
+    p_pa = float(p_kPa) * 1000.0
+    rh = np.clip(float(RH_percent), 0.1, 100.0)
+
+    fr_o, fr_n = relaxation_frequencies_oxygen_nitrogen(t_k, rh, p_pa)
+    t_ratio = t_k / ISO9613_REFERENCE_T_K
+
+    classical = 1.84e-11 * (ISO9613_REFERENCE_P_PA / p_pa) * np.sqrt(t_ratio)
+    oxygen = 0.01275 * np.exp(-2239.1 / t_k) / (fr_o + (f * f) / fr_o)
+    nitrogen = 0.1068 * np.exp(-3352.0 / t_k) / (fr_n + (f * f) / fr_n)
+    molecular = np.power(t_ratio, -2.5) * (oxygen + nitrogen)
+
+    alpha = 8.686 * (f * f) * (classical + molecular)
+    return float(alpha)
 
 
 def compute_adiv(d):
@@ -132,10 +174,14 @@ def compute_lpa_from_sources_grid(
     nodata_mask,
     use_bands=False,
     sources_spectra=None,
+    temperature_c=10.0,
+    relative_humidity=70.0,
+    pressure_kpa=101.325,
 ):
     p_tot = np.zeros_like(x_grid, dtype=np.float64)
 
     if use_bands:
+        alpha_per_band = {freq: alpha_iso9613_1(freq, temperature_c, relative_humidity, pressure_kpa) for freq in BANDS}
         active_sources = sources_spectra or []
         if not active_sources:
             for src in sources:
@@ -151,11 +197,11 @@ def compute_lpa_from_sources_grid(
             d = np.maximum(d, d_min)
 
             adiv = compute_adiv(d)
-            aatm = compute_aatm_broadband(alpha_atm, d)
             agr = compute_agr_simplified(enable_ground, g_value, d)
 
             for freq in BANDS:
-                lp_band = float(bands[freq]) - (adiv + aatm + agr)
+                aatm_band = alpha_per_band[freq] * d
+                lp_band = float(bands[freq]) - (adiv + aatm_band + agr)
                 p_tot += np.power(10.0, (lp_band + A_WEIGHT_DB[freq]) / 10.0)
 
         out = np.full_like(x_grid, np.nan, dtype=np.float64)
@@ -195,6 +241,9 @@ def compute_lpa_for_receptors_points(
     d_min,
     use_bands=False,
     sources_spectra=None,
+    temperature_c=10.0,
+    relative_humidity=70.0,
+    pressure_kpa=101.325,
 ):
     rec_xy = np.asarray(rec_xy, dtype=np.float64)
     rec_z = np.asarray(rec_z, dtype=np.float64)
@@ -204,6 +253,7 @@ def compute_lpa_for_receptors_points(
     valid = np.isfinite(rec_xy[:, 0]) & np.isfinite(rec_xy[:, 1]) & np.isfinite(rec_z)
 
     if use_bands:
+        alpha_per_band = {freq: alpha_iso9613_1(freq, temperature_c, relative_humidity, pressure_kpa) for freq in BANDS}
         active_sources = sources_spectra or []
         if not active_sources:
             for src in sources:
@@ -219,11 +269,11 @@ def compute_lpa_for_receptors_points(
             d = np.maximum(d, d_min)
 
             adiv = compute_adiv(d)
-            aatm = compute_aatm_broadband(alpha_atm, d)
             agr = compute_agr_simplified(enable_ground, g_value, d)
 
             for freq in BANDS:
-                lp_band = float(bands[freq]) - (adiv + aatm + agr)
+                aatm_band = alpha_per_band[freq] * d
+                lp_band = float(bands[freq]) - (adiv + aatm_band + agr)
                 contrib = np.power(10.0, (lp_band + A_WEIGHT_DB[freq]) / 10.0)
                 p_tot += np.where(valid, contrib, 0.0)
 
