@@ -77,3 +77,15 @@ reset_local.bat
 ```
 
 > Attenzione: operazione distruttiva (`git reset --hard` + `git clean -fd`).
+
+
+## Test core ISO9613 plugin QGIS
+
+Nel plugin `iso9613_lpa_raster` il motore numerico è ora separato in un modulo puro Python (`iso9613_lpa_raster/core`).
+Per eseguire i test unitari fuori da QGIS:
+
+```bash
+pytest -q tests/test_core.py tests/test_regressions.py
+```
+
+Requisiti minimi: `numpy` e `pytest` (opzionale ma consigliato).
