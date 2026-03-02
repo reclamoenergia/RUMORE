@@ -6,8 +6,15 @@ import numpy as np
 from osgeo import gdal
 
 from ..core.iso9613_core import (
+    A_WEIGHT_DB,
+    BANDS,
+    abar_from_dz,
+    alpha_iso9613_1,
     build_source_spectrum,
+    compute_adiv,
+    compute_agr_iso9613_2_octave,
     compute_lpa_from_sources_grid,
+    dz_iso_single_screen,
     reconstruct_lwa_total_from_unweighted,
 )
 
@@ -39,6 +46,9 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
     FIELD_NAME = "FIELD_NAME"
     FIELD_HSRC = "FIELD_HSRC"
     FIELD_LWA = "FIELD_LWA"
+    BARRIERS = "BARRIERS"
+    BARRIER_HEIGHT_FIELD = "BARRIER_HEIGHT_FIELD"
+    BARRIER_HEIGHT_DEFAULT = "BARRIER_HEIGHT_DEFAULT"
     H_REC = "H_REC"
     BAF = "BAF"
     ALPHA_ATM = "ALPHA_ATM"
@@ -126,6 +136,32 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
                 "Campo LwA (dB re 1 pW)",
                 parentLayerParameterName=self.SOURCES,
                 type=QgsProcessingParameterField.Numeric,
+            )
+        )
+        self.addParameter(
+            QgsProcessingParameterFeatureSource(
+                self.BARRIERS,
+                "Barriere lineari (opzionale)",
+                [QgsProcessing.TypeVectorLine],
+                optional=True,
+            )
+        )
+        self.addParameter(
+            QgsProcessingParameterField(
+                self.BARRIER_HEIGHT_FIELD,
+                "Campo altezza barriera (m, opzionale)",
+                parentLayerParameterName=self.BARRIERS,
+                type=QgsProcessingParameterField.Numeric,
+                optional=True,
+            )
+        )
+        self.addParameter(
+            QgsProcessingParameterNumber(
+                self.BARRIER_HEIGHT_DEFAULT,
+                "Altezza barriera default (m)",
+                type=QgsProcessingParameterNumber.Double,
+                defaultValue=5.0,
+                minValue=0.0,
             )
         )
         for freq, field_name in self.FIELD_LW_MAP.items():
@@ -254,6 +290,9 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
         field_name = self.parameterAsString(parameters, self.FIELD_NAME, context)
         field_hsrc = self.parameterAsString(parameters, self.FIELD_HSRC, context)
         field_lwa = self.parameterAsString(parameters, self.FIELD_LWA, context)
+        barriers_source = self.parameterAsSource(parameters, self.BARRIERS, context)
+        barrier_height_field = self.parameterAsString(parameters, self.BARRIER_HEIGHT_FIELD, context)
+        barrier_height_default = self.parameterAsDouble(parameters, self.BARRIER_HEIGHT_DEFAULT, context)
         use_bands = self.parameterAsBool(parameters, self.USE_OCTAVE_BANDS, context)
         spectrum_idx = self.parameterAsEnum(parameters, self.SPECTRUM_MODE, context)
         offsets_text = self.parameterAsString(parameters, self.OFFSETS, context)
@@ -297,6 +336,33 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
             mode_key = "BANDS_FROM_FIELDS"
 
         offsets = self._parse_offsets(offsets_text)
+
+        barriers = []
+        if barriers_source is not None:
+            if QgsWkbTypes.geometryType(barriers_source.wkbType()) != QgsWkbTypes.LineGeometry:
+                raise QgsProcessingException("Il layer barriere deve essere LineString/MultiLineString.")
+            barrier_transform = None
+            if barriers_source.sourceCrs().isValid() and barriers_source.sourceCrs() != dem_layer.crs():
+                barrier_transform = QgsCoordinateTransform(barriers_source.sourceCrs(), dem_layer.crs(), QgsProject.instance())
+            barrier_fields = barriers_source.fields()
+            h_idx = barrier_fields.lookupField(barrier_height_field) if barrier_height_field else -1
+            for feat in barriers_source.getFeatures():
+                geom = feat.geometry()
+                if geom is None or geom.isEmpty():
+                    continue
+                if barrier_transform is not None:
+                    geom = QgsGeometry(geom)
+                    geom.transform(barrier_transform)
+                if h_idx >= 0:
+                    raw_h = feat[h_idx]
+                    if raw_h in (None, ""):
+                        h_bar = barrier_height_default
+                        feedback.pushWarning(f"Barriera {feat.id()}: altezza mancante, uso default {barrier_height_default} m")
+                    else:
+                        h_bar = float(raw_h)
+                else:
+                    h_bar = barrier_height_default
+                barriers.append({"geom": geom, "h": max(0.0, h_bar)})
 
         dem_path = dem_layer.source()
         dem_ds = gdal.Open(dem_path, gdal.GA_ReadOnly)
@@ -465,23 +531,45 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
                 y = gt[3] + (cc + 0.5) * gt[4] + (rr + 0.5) * gt[5]
 
                 z_r = dem_tile + h_rec
-                lpa_tile = compute_lpa_from_sources_grid(
-                    x_grid=x,
-                    y_grid=y,
-                    z_rec=z_r,
-                    sources=valid_sources,
-                    alpha_atm=alpha_atm,
-                    enable_ground=enable_ground,
-                    g_value=g_value,
-                    d_min=d_min,
-                    nodata_mask=nodata_tile,
-                    use_bands=use_bands,
-                    sources_spectra=valid_spectra,
-                    temperature_c=temperature_c,
-                    relative_humidity=relative_humidity,
-                    pressure_kpa=pressure_kpa,
-                    receiver_height_m=h_rec,
-                )
+                if barriers and use_bands:
+                    lpa_tile = self._compute_tile_with_barriers(
+                        x,
+                        y,
+                        z_r,
+                        nodata_tile,
+                        valid_spectra,
+                        dem_band,
+                        gt,
+                        dem_nodata,
+                        barriers,
+                        enable_ground,
+                        g_value,
+                        d_min,
+                        temperature_c,
+                        relative_humidity,
+                        pressure_kpa,
+                        h_rec,
+                    )
+                else:
+                    if barriers and not use_bands and done == 0:
+                        feedback.pushInfo("Barriere ignorate con USE_OCTAVE_BANDS=False (Abar=0).")
+                    lpa_tile = compute_lpa_from_sources_grid(
+                        x_grid=x,
+                        y_grid=y,
+                        z_rec=z_r,
+                        sources=valid_sources,
+                        alpha_atm=alpha_atm,
+                        enable_ground=enable_ground,
+                        g_value=g_value,
+                        d_min=d_min,
+                        nodata_mask=nodata_tile,
+                        use_bands=use_bands,
+                        sources_spectra=valid_spectra,
+                        temperature_c=temperature_c,
+                        relative_humidity=relative_humidity,
+                        pressure_kpa=pressure_kpa,
+                        receiver_height_m=h_rec,
+                    )
 
                 out_tile = np.full((r1 - r0, c1 - c0), self.OUTPUT_NODATA, dtype=np.float32)
                 calc_mask = ~np.isnan(lpa_tile)
@@ -497,6 +585,84 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
         dem_ds = None
 
         return {self.OUTPUT: output_path}
+
+    @staticmethod
+    def _compute_tile_with_barriers(
+        x_grid,
+        y_grid,
+        z_rec,
+        nodata_mask,
+        sources_spectra,
+        dem_band,
+        gt,
+        dem_nodata,
+        barriers,
+        enable_ground,
+        g_value,
+        d_min,
+        temperature_c,
+        relative_humidity,
+        pressure_kpa,
+        h_rec,
+    ):
+        out = np.full_like(x_grid, np.nan, dtype=np.float64)
+        alpha_per_band = {freq: alpha_iso9613_1(freq, temperature_c, relative_humidity, pressure_kpa) for freq in BANDS}
+        rows, cols = x_grid.shape
+        for r in range(rows):
+            for c in range(cols):
+                if nodata_mask[r, c]:
+                    continue
+                xr = float(x_grid[r, c])
+                yr = float(y_grid[r, c])
+                zr = float(z_rec[r, c])
+                p_tot = 0.0
+                for src in sources_spectra:
+                    x_s = float(src["x"])
+                    y_s = float(src["y"])
+                    z_s = float(src["z"])
+                    dxy = math.hypot(xr - x_s, yr - y_s)
+                    d = max(d_min, math.sqrt(dxy * dxy + (zr - z_s) * (zr - z_s)))
+                    adiv = float(compute_adiv(d))
+                    line = QgsGeometry.fromWkt(f"LINESTRING({x_s} {y_s}, {xr} {yr})")
+                    best = None
+                    for b in barriers:
+                        inter = line.intersection(b["geom"])
+                        if inter is None or inter.isEmpty():
+                            continue
+                        points = inter.asMultiPoint() if inter.isMultipart() else [inter.asPoint()]
+                        for p in points:
+                            z_ground = ISO9613LpaRasterAlgorithm._sample_dem_nearest(dem_band, gt, p.x(), p.y())
+                            if z_ground is None or ISO9613LpaRasterAlgorithm._is_nodata_value(z_ground, dem_nodata):
+                                continue
+                            z_edge = z_ground + b["h"]
+                            dss = math.sqrt((p.x() - x_s) ** 2 + (p.y() - y_s) ** 2 + (z_edge - z_s) ** 2)
+                            dsr = math.sqrt((xr - p.x()) ** 2 + (yr - p.y()) ** 2 + (zr - z_edge) ** 2)
+                            z_diff = max(0.0, dss + dsr - d)
+                            if best is None or z_diff > best["z"]:
+                                best = {"dss": dss, "dsr": dsr, "z": z_diff}
+                    for freq in BANDS:
+                        aatm = alpha_per_band[freq] * d
+                        h_src = float(src.get("h_src", 1.0))
+                        agr = compute_agr_iso9613_2_octave(freq, d, h_src, h_rec, g_value) if enable_ground else 0.0
+                        abar = 0.0
+                        if best is not None and best["z"] > 0.0:
+                            dz = dz_iso_single_screen(freq, best["dss"], best["dsr"], d, best["z"])
+                            abar = abar_from_dz(dz, agr)
+                        lp = float(src["lw_band"][freq]) - (adiv + aatm + agr + abar)
+                        p_tot += 10.0 ** ((lp + A_WEIGHT_DB[freq]) / 10.0)
+                if p_tot > 0.0:
+                    out[r, c] = 10.0 * math.log10(p_tot)
+        return out
+
+    @staticmethod
+    def _sample_dem_nearest(dem_band, gt, x, y):
+        col, row = ISO9613LpaRasterAlgorithm._xy_to_colrow(x, y, gt)
+        if col < 0 or row < 0 or col >= dem_band.XSize or row >= dem_band.YSize:
+            return None
+        px = dem_band.ReadAsArray(col, row, 1, 1)
+        if px is None:
+            return None
+        return float(px[0, 0])
 
     @staticmethod
     def _resolve_mode_key(idx):

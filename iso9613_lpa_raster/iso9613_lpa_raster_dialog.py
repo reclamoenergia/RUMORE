@@ -48,6 +48,17 @@ class ISO9613LpaRasterDialog(QDialog):
         self.src_combo.setFilters(QgsMapLayerProxyModel.PointLayer)
         layout.addRow("Sorgenti", self.src_combo)
 
+        self.barriers_combo = QgsMapLayerComboBox()
+        self.barriers_combo.setFilters(QgsMapLayerProxyModel.LineLayer)
+        layout.addRow("Barriere (opzionale)", self.barriers_combo)
+
+        self.barrier_height_field = QgsFieldComboBox()
+        self.barrier_height_field.setFilters(QgsFieldProxyModel.Numeric)
+        layout.addRow("Campo altezza barriera", self.barrier_height_field)
+
+        self.barrier_height_default = self._make_spin(0.0, 1000.0, 5.0)
+        layout.addRow("Altezza barriera default (m)", self.barrier_height_default)
+
         self.hsrc_field = QgsFieldComboBox()
         self.hsrc_field.setFilters(QgsFieldProxyModel.Numeric)
         layout.addRow("Campo h_src", self.hsrc_field)
@@ -57,6 +68,7 @@ class ISO9613LpaRasterDialog(QDialog):
         layout.addRow("Campo LwA", self.lwa_field)
 
         self.src_combo.layerChanged.connect(self._on_source_changed)
+        self.barriers_combo.layerChanged.connect(self._on_barriers_changed)
 
         self.chk_use_selected_sources = QCheckBox("Usa solo sorgenti selezionate")
         self.chk_use_selected_sources.setChecked(False)
@@ -170,6 +182,9 @@ class ISO9613LpaRasterDialog(QDialog):
         self.hsrc_field.setLayer(layer)
         self.lwa_field.setLayer(layer)
 
+    def _on_barriers_changed(self, layer):
+        self.barrier_height_field.setLayer(layer)
+
 
     def _on_spectrum_mode_changed(self, idx):
         self.offsets_edit.setEnabled(False)
@@ -270,6 +285,9 @@ class ISO9613LpaRasterDialog(QDialog):
             "FIELD_NAME": None,
             "FIELD_HSRC": field_hsrc,
             "FIELD_LWA": field_lwa,
+            "BARRIERS": self.barriers_combo.currentLayer(),
+            "BARRIER_HEIGHT_FIELD": self.barrier_height_field.currentField().strip() or None,
+            "BARRIER_HEIGHT_DEFAULT": self.barrier_height_default.value(),
             "H_REC": self.h_rec.value(),
             "BAF": self.baf.value(),
             "ALPHA_ATM": self.alpha.value(),
@@ -312,6 +330,9 @@ class ISO9613LpaRasterDialog(QDialog):
                     "FIELD_NAME": None,
                     "FIELD_HSRC": field_hsrc,
                     "FIELD_LWA": field_lwa,
+                    "BARRIERS": self.barriers_combo.currentLayer(),
+                    "BARRIER_HEIGHT_FIELD": self.barrier_height_field.currentField().strip() or None,
+                    "BARRIER_HEIGHT_DEFAULT": self.barrier_height_default.value(),
                     "RECEPTORS": receptors_layer,
                     "H_REC": self.h_rec.value(),
                     "BAF": self.baf.value(),
