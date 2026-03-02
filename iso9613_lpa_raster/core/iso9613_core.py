@@ -167,47 +167,59 @@ def _to_numpy_or_scalar(value):
     return float(arr) if arr.ndim == 0 else arr
 
 
-def _iso9613_ground_correction(f_hz, h_m, d_m):
-    h = np.maximum(np.asarray(h_m, dtype=np.float64), 0.0)
-    d = np.maximum(np.asarray(d_m, dtype=np.float64), 1.0)
+ISO9613_2_AS_COEFF = {
+    63: (3.0, 5.7),
+    125: (2.0, 4.0),
+    250: (1.2, 2.0),
+    500: (0.8, 1.0),
+    1000: (0.5, 0.5),
+    2000: (0.3, 0.2),
+    4000: (0.2, 0.0),
+    8000: (0.2, 0.0),
+}
 
-    p = np.exp(-0.12 * np.power(h - 5.0, 2.0)) * (1.0 - np.exp(-d / 50.0))
-    q = np.exp(-0.09 * np.power(h, 2.0)) * (1.0 - np.exp(-2.8e-6 * np.power(d, 2.0)))
 
+def _nominal_octave_band(f_hz):
     f = int(round(float(f_hz)))
-    if f <= 63:
-        corr = 1.5 + 3.0 * p + 5.7 * q
-    elif f <= 125:
-        corr = 1.5 + 2.0 * p + 4.0 * q
-    elif f <= 250:
-        corr = 1.5 + 1.2 * p + 2.0 * q
-    elif f <= 500:
-        corr = 1.5 + 0.8 * p + 1.0 * q
-    elif f <= 1000:
-        corr = 1.5 + 0.5 * p + 0.5 * q
-    elif f <= 2000:
-        corr = 1.5 + 0.3 * p + 0.2 * q
-    else:
-        corr = 1.5 + 0.2 * p
+    if f in ISO9613_2_AS_COEFF:
+        return f
+    raise ValueError(f"Unsupported octave band {f_hz}. Use one of: {BANDS}")
 
-    return np.clip(corr, -20.0, 20.0)
+
+def _compute_a_prime_iso(f_hz, d, h):
+    f = _nominal_octave_band(f_hz)
+    c_p, c_q = ISO9613_2_AS_COEFF[f]
+    p_term = np.exp(-0.12 * np.power(h - 5.0, 2.0)) * (1.0 - np.exp(-d / 50.0))
+    q_term = np.exp(-0.09 * np.power(h, 2.0)) * (1.0 - np.exp(-2.8e-6 * np.power(d, 2.0)))
+    return 1.5 + c_p * p_term + c_q * q_term
+
+
+def _compute_as_iso(f_hz, d, hs, hr, G):
+    del hr
+    return -1.5 + G * _compute_a_prime_iso(f_hz, d, hs)
+
+
+def _compute_ar_iso(f_hz, d, hs, hr, G):
+    del hs
+    return -1.5 + G * _compute_a_prime_iso(f_hz, d, hr)
+
+
+def _compute_am_iso(f_hz, d, hs, hr, G):
+    del f_hz
+    h_sum = hs + hr
+    q = np.where(d <= (30.0 * h_sum), 0.0, 1.0 - (30.0 * h_sum) / d)
+    return -3.0 * q * (1.0 - G)
 
 
 def compute_agr_iso9613_2_octave(f_hz, d_m, hs_m, hr_m, G):
     d = np.maximum(np.asarray(d_m, dtype=np.float64), 1.0)
-    hs = np.clip(float(hs_m), 0.0, 1.0e4)
-    hr = np.clip(float(hr_m), 0.0, 1.0e4)
+    hs = np.clip(np.asarray(hs_m, dtype=np.float64), 0.0, 1.0e4)
+    hr = np.clip(np.asarray(hr_m, dtype=np.float64), 0.0, 1.0e4)
     g = np.clip(float(G), 0.0, 1.0)
-
-    as_zone = -1.5 + g * _iso9613_ground_correction(f_hz, hs, d)
-    ar_zone = -1.5 + g * _iso9613_ground_correction(f_hz, hr, d)
-
-    h_sum = hs + hr
-    q = np.where(d <= (30.0 * h_sum), 0.0, 1.0 - (30.0 * h_sum) / d)
-    am_zone = -3.0 * q * (1.0 - g)
-
+    as_zone = _compute_as_iso(f_hz, d, hs, hr, g)
+    am_zone = _compute_am_iso(f_hz, d, hs, hr, g)
+    ar_zone = _compute_ar_iso(f_hz, d, hs, hr, g)
     agr = as_zone + am_zone + ar_zone
-    agr = np.clip(agr, -50.0, 50.0)
     return _to_numpy_or_scalar(agr)
 
 
