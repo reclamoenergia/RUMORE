@@ -77,7 +77,7 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
         return "iso9613_lpa_raster_v1"
 
     def displayName(self):
-        return "ISO9613 LpA Raster (v2.1)"
+        return "ISO9613 LpA Raster (v2.2)"
 
     def group(self):
         return "Acoustics"
@@ -397,7 +397,7 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
                 continue
             z_s = z_dem_val + h_src
             valid_sources.append((name, x_s, y_s, z_s, lwa))
-            valid_spectra.append({"x": x_s, "y": y_s, "z": z_s, "lwa": lwa, "lw_band": src_spec["lw_band"]})
+            valid_spectra.append({"x": x_s, "y": y_s, "z": z_s, "h_src": h_src, "lwa": lwa, "lw_band": src_spec["lw_band"]})
 
         if not valid_sources:
             raise QgsProcessingException("Tutte le sorgenti sono state scartate.")
@@ -420,6 +420,7 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
                 f"T={temperature_c:.2f}°C, RH={relative_humidity:.1f}%, p={pressure_kpa:.3f} kPa"
             )
             feedback.pushInfo("alpha_atm manuale ignorato in modalità bande.")
+            feedback.pushInfo(f"Ground effect: ISO9613-2 octave bands, G={g_value:.3f} ({'enabled' if enable_ground else 'disabled'})")
             for src in valid_spectra[:5]:
                 lwa_rec = reconstruct_lwa_total_from_unweighted(src["lw_band"])
                 feedback.pushInfo(f"Sorgente @({src['x']:.2f},{src['y']:.2f}): LwA user={src['lwa']:.2f}, check ricostruzione={lwa_rec:.2f}")
@@ -479,6 +480,7 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
                     temperature_c=temperature_c,
                     relative_humidity=relative_humidity,
                     pressure_kpa=pressure_kpa,
+                    receiver_height_m=h_rec,
                 )
 
                 out_tile = np.full((r1 - r0, c1 - c0), self.OUTPUT_NODATA, dtype=np.float32)

@@ -8,8 +8,10 @@ from iso9613_lpa_raster.core.iso9613_core import (
     build_band_lw_from_shape_scaled_to_LwA,
     build_source_spectrum,
     compute_adiv,
+    compute_agr_iso9613_2_octave,
     compute_agr_simplified,
     compute_lpa_for_receptors_points,
+    compute_lpa_from_sources_grid,
     reconstruct_lwa_total_from_unweighted,
 )
 
@@ -61,6 +63,56 @@ def test_ground_toggle():
     assert on > 0.0
 
 
+def test_agr_disabled_is_zero():
+    rec_xy = np.array([[250.0, 0.0]], dtype=np.float64)
+    rec_z = np.array([0.0], dtype=np.float64)
+    sources = [(0.0, 0.0, 0.0, 100.0)]
+    source_spec = [{"x": 0.0, "y": 0.0, "z": 0.0, "h_src": 2.0, "lwa": 100.0, "lw_band": build_source_spectrum(100.0, "FLAT_FROM_LWA")}]
+    out_g0 = compute_lpa_for_receptors_points(
+        rec_xy=rec_xy,
+        rec_z=rec_z,
+        sources=sources,
+        alpha_atm=0.0,
+        enable_ground=False,
+        g_value=0.0,
+        d_min=1.0,
+        use_bands=True,
+        sources_spectra=source_spec,
+        receiver_height_m=4.0,
+    )
+    out_g1 = compute_lpa_for_receptors_points(
+        rec_xy=rec_xy,
+        rec_z=rec_z,
+        sources=sources,
+        alpha_atm=0.0,
+        enable_ground=False,
+        g_value=1.0,
+        d_min=1.0,
+        use_bands=True,
+        sources_spectra=source_spec,
+        receiver_height_m=4.0,
+    )
+    assert np.isfinite(out_g0[0])
+    assert np.isfinite(out_g1[0])
+    assert abs(float(out_g0[0] - out_g1[0])) < 1e-12
+
+
+def test_agr_changes_with_g():
+    agr0 = compute_agr_iso9613_2_octave(1000, 500.0, 2.0, 4.0, 0.0)
+    agr1 = compute_agr_iso9613_2_octave(1000, 500.0, 2.0, 4.0, 1.0)
+    assert np.isfinite(agr0)
+    assert np.isfinite(agr1)
+    assert not np.isclose(agr0, agr1)
+
+
+def test_agr_frequency_dependence():
+    agr_63 = compute_agr_iso9613_2_octave(63, 500.0, 2.0, 4.0, 0.5)
+    agr_4000 = compute_agr_iso9613_2_octave(4000, 500.0, 2.0, 4.0, 0.5)
+    assert np.isfinite(agr_63)
+    assert np.isfinite(agr_4000)
+    assert not np.isclose(agr_63, agr_4000)
+
+
 def test_a_weight_reconstruction():
     lw_flat = {freq: 95.0 for freq in BANDS}
     reconstructed = reconstruct_lwa_total_from_unweighted(lw_flat)
@@ -93,7 +145,7 @@ def test_use_bands_output_is_finite():
     rec_xy = np.array([[50.0, 0.0]], dtype=np.float64)
     rec_z = np.array([0.0], dtype=np.float64)
     sources = [(0.0, 0.0, 0.0, 100.0)]
-    sources_spectra = [{"x": 0.0, "y": 0.0, "z": 0.0, "lwa": 100.0, "lw_band": build_source_spectrum(100.0, "TURBINE_SHAPE_SCALED")}]
+    sources_spectra = [{"x": 0.0, "y": 0.0, "z": 0.0, "h_src": 2.0, "lwa": 100.0, "lw_band": build_source_spectrum(100.0, "TURBINE_SHAPE_SCALED")}]
     out = compute_lpa_for_receptors_points(
         rec_xy=rec_xy,
         rec_z=rec_z,
@@ -107,5 +159,27 @@ def test_use_bands_output_is_finite():
         temperature_c=10.0,
         relative_humidity=70.0,
         pressure_kpa=101.325,
+        receiver_height_m=4.0,
     )
     assert np.isfinite(out[0])
+
+
+def test_no_change_when_use_bands_false_regression():
+    x = np.array([[100.0]], dtype=np.float64)
+    y = np.array([[0.0]], dtype=np.float64)
+    z = np.array([[0.0]], dtype=np.float64)
+    nodata = np.array([[False]])
+    sources = [(0.0, 0.0, 0.0, 100.0)]
+    out = compute_lpa_from_sources_grid(
+        x_grid=x,
+        y_grid=y,
+        z_rec=z,
+        sources=sources,
+        alpha_atm=0.0,
+        enable_ground=False,
+        g_value=0.5,
+        d_min=1.0,
+        nodata_mask=nodata,
+        use_bands=False,
+    )
+    assert abs(float(out[0, 0]) - 49.0) <= 0.1

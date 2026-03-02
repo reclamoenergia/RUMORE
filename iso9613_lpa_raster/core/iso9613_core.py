@@ -162,6 +162,55 @@ def compute_agr_simplified(enable_ground, g_value, d):
     return np.clip(agr, 0.0, agr_max)
 
 
+def _to_numpy_or_scalar(value):
+    arr = np.asarray(value, dtype=np.float64)
+    return float(arr) if arr.ndim == 0 else arr
+
+
+def _iso9613_ground_correction(f_hz, h_m, d_m):
+    h = np.maximum(np.asarray(h_m, dtype=np.float64), 0.0)
+    d = np.maximum(np.asarray(d_m, dtype=np.float64), 1.0)
+
+    p = np.exp(-0.12 * np.power(h - 5.0, 2.0)) * (1.0 - np.exp(-d / 50.0))
+    q = np.exp(-0.09 * np.power(h, 2.0)) * (1.0 - np.exp(-2.8e-6 * np.power(d, 2.0)))
+
+    f = int(round(float(f_hz)))
+    if f <= 63:
+        corr = 1.5 + 3.0 * p + 5.7 * q
+    elif f <= 125:
+        corr = 1.5 + 2.0 * p + 4.0 * q
+    elif f <= 250:
+        corr = 1.5 + 1.2 * p + 2.0 * q
+    elif f <= 500:
+        corr = 1.5 + 0.8 * p + 1.0 * q
+    elif f <= 1000:
+        corr = 1.5 + 0.5 * p + 0.5 * q
+    elif f <= 2000:
+        corr = 1.5 + 0.3 * p + 0.2 * q
+    else:
+        corr = 1.5 + 0.2 * p
+
+    return np.clip(corr, -20.0, 20.0)
+
+
+def compute_agr_iso9613_2_octave(f_hz, d_m, hs_m, hr_m, G):
+    d = np.maximum(np.asarray(d_m, dtype=np.float64), 1.0)
+    hs = np.clip(float(hs_m), 0.0, 1.0e4)
+    hr = np.clip(float(hr_m), 0.0, 1.0e4)
+    g = np.clip(float(G), 0.0, 1.0)
+
+    as_zone = -1.5 + g * _iso9613_ground_correction(f_hz, hs, d)
+    ar_zone = -1.5 + g * _iso9613_ground_correction(f_hz, hr, d)
+
+    h_sum = hs + hr
+    q = np.where(d <= (30.0 * h_sum), 0.0, 1.0 - (30.0 * h_sum) / d)
+    am_zone = -3.0 * q * (1.0 - g)
+
+    agr = as_zone + am_zone + ar_zone
+    agr = np.clip(agr, -50.0, 50.0)
+    return _to_numpy_or_scalar(agr)
+
+
 def compute_lpa_from_sources_grid(
     x_grid,
     y_grid,
@@ -177,6 +226,7 @@ def compute_lpa_from_sources_grid(
     temperature_c=10.0,
     relative_humidity=70.0,
     pressure_kpa=101.325,
+    receiver_height_m=4.0,
 ):
     p_tot = np.zeros_like(x_grid, dtype=np.float64)
 
@@ -197,10 +247,15 @@ def compute_lpa_from_sources_grid(
             d = np.maximum(d, d_min)
 
             adiv = compute_adiv(d)
-            agr = compute_agr_simplified(enable_ground, g_value, d)
+            h_src = float(src.get("h_src", 1.0)) if isinstance(src, dict) else 1.0
+            h_rec = float(receiver_height_m)
 
             for freq in BANDS:
                 aatm_band = alpha_per_band[freq] * d
+                if enable_ground:
+                    agr = compute_agr_iso9613_2_octave(freq, d, h_src, h_rec, g_value)
+                else:
+                    agr = 0.0
                 lp_band = float(bands[freq]) - (adiv + aatm_band + agr)
                 p_tot += np.power(10.0, (lp_band + A_WEIGHT_DB[freq]) / 10.0)
 
@@ -244,6 +299,7 @@ def compute_lpa_for_receptors_points(
     temperature_c=10.0,
     relative_humidity=70.0,
     pressure_kpa=101.325,
+    receiver_height_m=4.0,
 ):
     rec_xy = np.asarray(rec_xy, dtype=np.float64)
     rec_z = np.asarray(rec_z, dtype=np.float64)
@@ -269,10 +325,15 @@ def compute_lpa_for_receptors_points(
             d = np.maximum(d, d_min)
 
             adiv = compute_adiv(d)
-            agr = compute_agr_simplified(enable_ground, g_value, d)
+            h_src = float(src.get("h_src", 1.0)) if isinstance(src, dict) else 1.0
+            h_rec = float(receiver_height_m)
 
             for freq in BANDS:
                 aatm_band = alpha_per_band[freq] * d
+                if enable_ground:
+                    agr = compute_agr_iso9613_2_octave(freq, d, h_src, h_rec, g_value)
+                else:
+                    agr = 0.0
                 lp_band = float(bands[freq]) - (adiv + aatm_band + agr)
                 contrib = np.power(10.0, (lp_band + A_WEIGHT_DB[freq]) / 10.0)
                 p_tot += np.where(valid, contrib, 0.0)
