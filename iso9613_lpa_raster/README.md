@@ -18,7 +18,7 @@ Plugin QGIS 3.x per calcolare un raster GeoTIFF `LpA_dB` da sorgenti puntuali co
 - Modello v1:
   - `Adiv = 20*log10(d)+11`
   - `Aatm = alpha_atm * d`
-  - `Agr` opzionale semplificato: `clip(k(G)*(1-exp(-d/200)),0,3)` con `k(G)=3*G`
+  - `Agr` in calcolo per banda (`use_bands=True`) secondo ISO 9613-2 (somma dei contributi `As + Am + Ar`).
   - Nessuna barriera (v1)
 - Somma energetica su tutte le sorgenti.
 - Tiling NumPy (tile size interno 512) + progress bar + cancel.
@@ -26,7 +26,7 @@ Plugin QGIS 3.x per calcolare un raster GeoTIFF `LpA_dB` da sorgenti puntuali co
 ## Limitazioni v1
 
 - `alpha_atm` è un coefficiente manuale costante (dB/m).
-- `Agr` è un modello semplificato, **non** full ISO 9613.
+- In modalità per banda, `Agr` segue ISO 9613-2 (effetto suolo per ottava).
 - Nessun termine di schermatura/barriera.
 
 ## Installazione

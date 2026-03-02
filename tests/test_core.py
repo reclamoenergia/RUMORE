@@ -113,6 +113,24 @@ def test_agr_frequency_dependence():
     assert not np.isclose(agr_63, agr_4000)
 
 
+def test_agr_vectorized_support():
+    d = np.array([100.0, 500.0, 1000.0], dtype=np.float64)
+    hs = np.array([2.0, 3.0, 4.0], dtype=np.float64)
+    hr = np.array([4.0, 4.0, 4.0], dtype=np.float64)
+    agr = compute_agr_iso9613_2_octave(500, d, hs, hr, 0.7)
+    assert isinstance(agr, np.ndarray)
+    assert agr.shape == d.shape
+    assert np.all(np.isfinite(agr))
+
+
+def test_agr_invalid_band_raises():
+    try:
+        compute_agr_iso9613_2_octave(315, 500.0, 2.0, 4.0, 0.5)
+    except ValueError:
+        return
+    assert False, 'Expected ValueError for unsupported octave band'
+
+
 def test_a_weight_reconstruction():
     lw_flat = {freq: 95.0 for freq in BANDS}
     reconstructed = reconstruct_lwa_total_from_unweighted(lw_flat)
