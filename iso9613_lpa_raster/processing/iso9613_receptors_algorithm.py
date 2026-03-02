@@ -77,7 +77,7 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
         return "iso9613_lpa_receptors"
 
     def displayName(self):
-        return "ISO9613 LpA Receptors (v2.1)"
+        return "ISO9613 LpA Receptors (v2.2)"
 
     def group(self):
         return "Acoustics"
@@ -323,6 +323,7 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
                     "x": pt.x(),
                     "y": pt.y(),
                     "z": z_dem + h_src,
+                    "h_src": h_src,
                     "lwa": lwa,
                     "lw_band": build_source_spectrum(lwa_total=lwa, mode=mode_key, lw_band_fields=lw_band_fields, user_offsets_db=offsets),
                 }
@@ -337,6 +338,7 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
                 f"T={temperature_c:.2f}°C, RH={relative_humidity:.1f}%, p={pressure_kpa:.3f} kPa"
             )
             feedback.pushInfo("alpha_atm manuale ignorato in modalità bande.")
+            feedback.pushInfo(f"Ground effect: ISO9613-2 octave bands, G={g_value:.3f} ({'enabled' if enable_ground else 'disabled'})")
 
         domain = None
         if baf_value is not None:
@@ -399,6 +401,7 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
                     temperature_c=temperature_c,
                     relative_humidity=relative_humidity,
                     pressure_kpa=pressure_kpa,
+                    receiver_height_m=h_rec,
                 )
                 if np.isfinite(lpa_vals[0]):
                     lpa_db = float(lpa_vals[0])

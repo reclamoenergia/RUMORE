@@ -33,7 +33,7 @@ class ISO9613LpaRasterDialog(QDialog):
     def __init__(self, iface, parent=None):
         super().__init__(parent)
         self.iface = iface
-        self.setWindowTitle("ISO9613 LpA Raster (v2.1)")
+        self.setWindowTitle("ISO9613 LpA Raster (v2.2)")
         self.setMinimumWidth(520)
         self._build_ui()
 
