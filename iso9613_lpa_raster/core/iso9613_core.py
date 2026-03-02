@@ -223,6 +223,30 @@ def compute_agr_iso9613_2_octave(f_hz, d_m, hs_m, hr_m, G):
     return _to_numpy_or_scalar(agr)
 
 
+def wavelength(f_hz):
+    return 343.0 / float(f_hz)
+
+
+def kmet_iso(dss, dsr, d, z):
+    if z <= 0.0:
+        return 1.0
+    ratio = (float(dss) * float(dsr) * float(d)) / max(2.0 * float(z), 1.0e-12)
+    return float(np.exp(-(1.0 / 2000.0) * np.sqrt(max(ratio, 0.0))))
+
+
+def dz_iso_single_screen(f_hz, dss, dsr, d, z, c2=20.0, c3=1.0):
+    if z <= 0.0:
+        return 0.0
+    lam = wavelength(f_hz)
+    kmet = kmet_iso(dss, dsr, d, z)
+    dz = 10.0 * np.log10(3.0 + (float(c2) / lam) * float(c3) * float(z) * kmet)
+    return float(max(0.0, dz))
+
+
+def abar_from_dz(dz, agr):
+    return float(max(0.0, float(dz) - float(agr)))
+
+
 def compute_lpa_from_sources_grid(
     x_grid,
     y_grid,
@@ -239,6 +263,7 @@ def compute_lpa_from_sources_grid(
     relative_humidity=70.0,
     pressure_kpa=101.325,
     receiver_height_m=4.0,
+    abar_per_band_by_source=None,
 ):
     p_tot = np.zeros_like(x_grid, dtype=np.float64)
 
@@ -253,6 +278,7 @@ def compute_lpa_from_sources_grid(
         for src in active_sources:
             x_s, y_s, z_s, lwa, lw_band = _source_spectrum_tuple(src)
             bands = lw_band or _flat_spectrum_from_lwa_total(lwa)
+            source_abar = abar_per_band_by_source.get((x_s, y_s, z_s), {}) if abar_per_band_by_source else {}
             dxy = np.hypot(x_grid - x_s, y_grid - y_s)
             dz = z_rec - z_s
             d = np.sqrt(dxy * dxy + dz * dz)
@@ -268,7 +294,8 @@ def compute_lpa_from_sources_grid(
                     agr = compute_agr_iso9613_2_octave(freq, d, h_src, h_rec, g_value)
                 else:
                     agr = 0.0
-                lp_band = float(bands[freq]) - (adiv + aatm_band + agr)
+                abar = source_abar.get(freq, 0.0)
+                lp_band = float(bands[freq]) - (adiv + aatm_band + agr + abar)
                 p_tot += np.power(10.0, (lp_band + A_WEIGHT_DB[freq]) / 10.0)
 
         out = np.full_like(x_grid, np.nan, dtype=np.float64)
@@ -312,6 +339,7 @@ def compute_lpa_for_receptors_points(
     relative_humidity=70.0,
     pressure_kpa=101.325,
     receiver_height_m=4.0,
+    abar_per_band_by_source=None,
 ):
     rec_xy = np.asarray(rec_xy, dtype=np.float64)
     rec_z = np.asarray(rec_z, dtype=np.float64)
@@ -331,6 +359,7 @@ def compute_lpa_for_receptors_points(
         for src in active_sources:
             x_s, y_s, z_s, lwa, lw_band = _source_spectrum_tuple(src)
             bands = lw_band or _flat_spectrum_from_lwa_total(lwa)
+            source_abar = abar_per_band_by_source.get((x_s, y_s, z_s), {}) if abar_per_band_by_source else {}
             dxy = np.hypot(rec_xy[:, 0] - x_s, rec_xy[:, 1] - y_s)
             dz = rec_z - z_s
             d = np.sqrt(dxy * dxy + dz * dz)
@@ -346,7 +375,8 @@ def compute_lpa_for_receptors_points(
                     agr = compute_agr_iso9613_2_octave(freq, d, h_src, h_rec, g_value)
                 else:
                     agr = 0.0
-                lp_band = float(bands[freq]) - (adiv + aatm_band + agr)
+                abar = source_abar.get(freq, 0.0)
+                lp_band = float(bands[freq]) - (adiv + aatm_band + agr + abar)
                 contrib = np.power(10.0, (lp_band + A_WEIGHT_DB[freq]) / 10.0)
                 p_tot += np.where(valid, contrib, 0.0)
 

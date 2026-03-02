@@ -5,6 +5,13 @@ import math
 import numpy as np
 
 from ..core.iso9613_core import (
+    BANDS,
+    A_WEIGHT_DB,
+    alpha_iso9613_1,
+    compute_adiv,
+    compute_agr_iso9613_2_octave,
+    dz_iso_single_screen,
+    abar_from_dz,
     build_source_spectrum,
     compute_lpa_for_receptors_points,
 )
@@ -42,6 +49,9 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
     FIELD_HSRC = "FIELD_HSRC"
     FIELD_LWA = "FIELD_LWA"
     RECEPTORS = "RECEPTORS"
+    BARRIERS = "BARRIERS"
+    BARRIER_HEIGHT_FIELD = "BARRIER_HEIGHT_FIELD"
+    BARRIER_HEIGHT_DEFAULT = "BARRIER_HEIGHT_DEFAULT"
     H_REC = "H_REC"
     BAF = "BAF"
     ALPHA_ATM = "ALPHA_ATM"
@@ -137,6 +147,32 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
             )
 
         self.addParameter(QgsProcessingParameterFeatureSource(self.RECEPTORS, "Ricettori puntuali", [QgsProcessing.TypeVectorPoint]))
+        self.addParameter(
+            QgsProcessingParameterFeatureSource(
+                self.BARRIERS,
+                "Barriere lineari (opzionale)",
+                [QgsProcessing.TypeVectorLine],
+                optional=True,
+            )
+        )
+        self.addParameter(
+            QgsProcessingParameterField(
+                self.BARRIER_HEIGHT_FIELD,
+                "Campo altezza barriera (m, opzionale)",
+                parentLayerParameterName=self.BARRIERS,
+                type=QgsProcessingParameterField.Numeric,
+                optional=True,
+            )
+        )
+        self.addParameter(
+            QgsProcessingParameterNumber(
+                self.BARRIER_HEIGHT_DEFAULT,
+                "Altezza barriera default (m)",
+                type=QgsProcessingParameterNumber.Double,
+                defaultValue=5.0,
+                minValue=0.0,
+            )
+        )
         self.addParameter(QgsProcessingParameterBoolean(self.USE_OCTAVE_BANDS, "USE_OCTAVE_BANDS", defaultValue=False))
         self.addParameter(QgsProcessingParameterEnum(self.SPECTRUM_MODE, "SPECTRUM_MODE", options=self.SPECTRUM_MODES, defaultValue=0))
         self.addParameter(QgsProcessingParameterString(self.OFFSETS, "OFFSETS (es. 63:-3;125:-2;...)", optional=True, defaultValue=""))
@@ -234,6 +270,9 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
         temperature_c = self.parameterAsDouble(parameters, self.TEMPERATURE_C, context)
         relative_humidity = self.parameterAsDouble(parameters, self.RELATIVE_HUMIDITY, context)
         pressure_kpa = self.parameterAsDouble(parameters, self.PRESSURE_KPA, context)
+        barriers_source = self.parameterAsSource(parameters, self.BARRIERS, context)
+        barrier_height_field = self.parameterAsString(parameters, self.BARRIER_HEIGHT_FIELD, context)
+        barrier_height_default = self.parameterAsDouble(parameters, self.BARRIER_HEIGHT_DEFAULT, context)
 
         baf_value = None
         if self.BAF in parameters and parameters[self.BAF] not in (None, ""):
@@ -254,6 +293,33 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
             raise QgsProcessingException("Il layer sorgenti deve essere Point.")
         if QgsWkbTypes.geometryType(rec_source.wkbType()) != QgsWkbTypes.PointGeometry:
             raise QgsProcessingException("Il layer ricettori deve essere Point.")
+
+        barriers = []
+        if barriers_source is not None:
+            if QgsWkbTypes.geometryType(barriers_source.wkbType()) != QgsWkbTypes.LineGeometry:
+                raise QgsProcessingException("Il layer barriere deve essere LineString/MultiLineString.")
+            barrier_transform = None
+            if barriers_source.sourceCrs().isValid() and barriers_source.sourceCrs() != dem_layer.crs():
+                barrier_transform = QgsCoordinateTransform(barriers_source.sourceCrs(), dem_layer.crs(), QgsProject.instance())
+            barrier_fields = barriers_source.fields()
+            h_idx = barrier_fields.lookupField(barrier_height_field) if barrier_height_field else -1
+            for feat in barriers_source.getFeatures():
+                geom = feat.geometry()
+                if geom is None or geom.isEmpty():
+                    continue
+                if barrier_transform is not None:
+                    geom = QgsGeometry(geom)
+                    geom.transform(barrier_transform)
+                if h_idx >= 0:
+                    raw_h = feat[h_idx]
+                    if raw_h in (None, ""):
+                        h_bar = barrier_height_default
+                        feedback.pushWarning(f"Barriera {feat.id()}: altezza mancante, uso default {barrier_height_default} m")
+                    else:
+                        h_bar = float(raw_h)
+                else:
+                    h_bar = barrier_height_default
+                barriers.append({"geom": geom, "h": max(0.0, h_bar)})
 
         fields = src_source.fields()
         h_field = fields.lookupField(field_hsrc)
@@ -388,23 +454,44 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
             else:
                 rec_xy = np.array([[rec_pt.x(), rec_pt.y()]], dtype=np.float64)
                 rec_z = np.array([z_rec_dem + h_rec], dtype=np.float64)
-                lpa_vals = compute_lpa_for_receptors_points(
-                    rec_xy=rec_xy,
-                    rec_z=rec_z,
-                    sources=sources,
-                    alpha_atm=alpha_atm,
-                    enable_ground=enable_ground,
-                    g_value=g_value,
-                    d_min=d_min,
-                    use_bands=use_bands,
-                    sources_spectra=sources_spectra,
-                    temperature_c=temperature_c,
-                    relative_humidity=relative_humidity,
-                    pressure_kpa=pressure_kpa,
-                    receiver_height_m=h_rec,
-                )
-                if np.isfinite(lpa_vals[0]):
-                    lpa_db = float(lpa_vals[0])
+                if barriers and use_bands:
+                    lpa_db = self._compute_lpa_with_barriers(
+                        rec_pt,
+                        float(rec_z[0]),
+                        sources_spectra,
+                        dem_band,
+                        gt,
+                        dem_nodata,
+                        barriers,
+                        enable_ground,
+                        g_value,
+                        d_min,
+                        temperature_c,
+                        relative_humidity,
+                        pressure_kpa,
+                        h_rec,
+                    )
+                else:
+                    if barriers and not use_bands:
+                        feedback.pushInfo("Barriere ignorate con USE_OCTAVE_BANDS=False (Abar=0).")
+                        barriers = []
+                    lpa_vals = compute_lpa_for_receptors_points(
+                        rec_xy=rec_xy,
+                        rec_z=rec_z,
+                        sources=sources,
+                        alpha_atm=alpha_atm,
+                        enable_ground=enable_ground,
+                        g_value=g_value,
+                        d_min=d_min,
+                        use_bands=use_bands,
+                        sources_spectra=sources_spectra,
+                        temperature_c=temperature_c,
+                        relative_humidity=relative_humidity,
+                        pressure_kpa=pressure_kpa,
+                        receiver_height_m=h_rec,
+                    )
+                    if np.isfinite(lpa_vals[0]):
+                        lpa_db = float(lpa_vals[0])
 
             out_feat = QgsFeature(rec_fields)
             out_feat.setGeometry(rec_feat.geometry())
@@ -423,6 +510,67 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
 
         dem_ds = None
         return {self.OUTPUT: dest_id}
+
+    @staticmethod
+    def _compute_lpa_with_barriers(
+        rec_pt,
+        rec_z,
+        sources_spectra,
+        dem_band,
+        gt,
+        dem_nodata,
+        barriers,
+        enable_ground,
+        g_value,
+        d_min,
+        temperature_c,
+        relative_humidity,
+        pressure_kpa,
+        h_rec,
+    ):
+        alpha_per_band = {freq: alpha_iso9613_1(freq, temperature_c, relative_humidity, pressure_kpa) for freq in BANDS}
+        p_tot = 0.0
+        for src in sources_spectra:
+            x_s = float(src["x"])
+            y_s = float(src["y"])
+            z_s = float(src["z"])
+            dxy = math.hypot(rec_pt.x() - x_s, rec_pt.y() - y_s)
+            dz_sr = rec_z - z_s
+            d = max(d_min, math.sqrt(dxy * dxy + dz_sr * dz_sr))
+            adiv = float(compute_adiv(d))
+            line = QgsGeometry.fromWkt(f"LINESTRING({x_s} {y_s}, {rec_pt.x()} {rec_pt.y()})")
+            abar_by_band = {freq: 0.0 for freq in BANDS}
+            best = None
+            for b in barriers:
+                inter = line.intersection(b["geom"])
+                if inter is None or inter.isEmpty():
+                    continue
+                pts = inter.asMultiPoint() if inter.isMultipart() else [inter.asPoint()]
+                for p in pts:
+                    z_ground = ISO9613LpaReceptorsAlgorithm._sample_dem_nearest(dem_band, gt, p.x(), p.y())
+                    if z_ground is None or ISO9613LpaReceptorsAlgorithm._is_nodata_value(z_ground, dem_nodata):
+                        continue
+                    z_edge = z_ground + b["h"]
+                    dss = math.sqrt((p.x() - x_s) ** 2 + (p.y() - y_s) ** 2 + (z_edge - z_s) ** 2)
+                    dsr = math.sqrt((rec_pt.x() - p.x()) ** 2 + (rec_pt.y() - p.y()) ** 2 + (rec_z - z_edge) ** 2)
+                    z_diff = max(0.0, dss + dsr - d)
+                    if best is None or z_diff > best["z"]:
+                        best = {"dss": dss, "dsr": dsr, "z": z_diff}
+            if best is not None and best["z"] > 0.0:
+                h_src = float(src.get("h_src", 1.0))
+                for freq in BANDS:
+                    agr = compute_agr_iso9613_2_octave(freq, d, h_src, h_rec, g_value) if enable_ground else 0.0
+                    dz = dz_iso_single_screen(freq, best["dss"], best["dsr"], d, best["z"])
+                    abar_by_band[freq] = abar_from_dz(dz, agr)
+
+            for freq in BANDS:
+                aatm = alpha_per_band[freq] * d
+                agr = compute_agr_iso9613_2_octave(freq, d, float(src.get("h_src", 1.0)), h_rec, g_value) if enable_ground else 0.0
+                lp_band = float(src["lw_band"][freq]) - (adiv + aatm + agr + abar_by_band[freq])
+                p_tot += 10.0 ** ((lp_band + A_WEIGHT_DB[freq]) / 10.0)
+        if p_tot <= 0.0:
+            return None
+        return 10.0 * math.log10(p_tot)
 
     @staticmethod
     def _resolve_mode_key(idx):

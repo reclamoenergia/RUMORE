@@ -10,6 +10,9 @@ from iso9613_lpa_raster.core.iso9613_core import (
     compute_adiv,
     compute_agr_iso9613_2_octave,
     compute_agr_simplified,
+    dz_iso_single_screen,
+    kmet_iso,
+    abar_from_dz,
     compute_lpa_for_receptors_points,
     compute_lpa_from_sources_grid,
     reconstruct_lwa_total_from_unweighted,
@@ -201,3 +204,25 @@ def test_no_change_when_use_bands_false_regression():
         use_bands=False,
     )
     assert abs(float(out[0, 0]) - 49.0) <= 0.1
+
+
+def test_kmet_bounds():
+    k1 = kmet_iso(50.0, 60.0, 100.0, 2.0)
+    assert 0.0 < k1 <= 1.0
+    assert kmet_iso(50.0, 60.0, 100.0, 0.0) == 1.0
+    assert kmet_iso(50.0, 60.0, 100.0, -1.0) == 1.0
+
+
+def test_dz_zero_when_z_le_0():
+    assert dz_iso_single_screen(1000, 50.0, 60.0, 100.0, 0.0) == 0.0
+
+
+def test_dz_increases_with_z():
+    z1 = dz_iso_single_screen(1000, 50.0, 60.0, 100.0, 0.1)
+    z2 = dz_iso_single_screen(1000, 50.0, 60.0, 100.0, 1.0)
+    assert z2 > z1
+
+
+def test_abar_non_negative():
+    assert abar_from_dz(1.0, 3.0) >= 0.0
+    assert abar_from_dz(5.0, 2.0) >= 0.0
