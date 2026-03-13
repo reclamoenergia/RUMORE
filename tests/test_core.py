@@ -8,6 +8,7 @@ from iso9613_lpa_raster.core.iso9613_core import (
     build_band_lw_from_shape_scaled_to_LwA,
     build_source_spectrum,
     compute_adiv,
+    compute_barrier_attenuation_broadband,
     compute_agr_iso9613_2_octave,
     compute_agr_simplified,
     dz_iso_single_screen,
@@ -226,3 +227,19 @@ def test_dz_increases_with_z():
 def test_abar_non_negative():
     assert abar_from_dz(1.0, 3.0) >= 0.0
     assert abar_from_dz(5.0, 2.0) >= 0.0
+
+
+def test_broadband_barrier_attenuation_zero_without_barrier():
+    lw_band = build_source_spectrum(lwa_total=100.0, mode="FLAT_FROM_LWA")
+    abar_bb = compute_barrier_attenuation_broadband(lw_band, {f: 0.0 for f in BANDS})
+    assert abs(abar_bb) < 1e-12
+
+
+def test_broadband_barrier_attenuation_increases_with_band_attenuation():
+    lw_band = build_source_spectrum(lwa_total=100.0, mode="TURBINE_SHAPE_SCALED")
+    low_barrier = {f: 2.0 for f in BANDS}
+    high_barrier = {f: 6.0 for f in BANDS}
+    abar_low = compute_barrier_attenuation_broadband(lw_band, low_barrier)
+    abar_high = compute_barrier_attenuation_broadband(lw_band, high_barrier)
+    assert abar_low > 0.0
+    assert abar_high >= abar_low
