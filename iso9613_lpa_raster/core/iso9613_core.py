@@ -247,6 +247,25 @@ def abar_from_dz(dz, agr):
     return float(max(0.0, float(dz) - float(agr)))
 
 
+def compute_barrier_attenuation_broadband(lw_band, abar_by_band, a_weight_db=None):
+    """Ricava una attenuazione broadband energeticamente coerente dalle bande di ottava."""
+    if not lw_band:
+        return 0.0
+    weights = A_WEIGHT_DB if a_weight_db is None else a_weight_db
+    p_no_bar = 0.0
+    p_with_bar = 0.0
+    for freq in BANDS:
+        if freq not in lw_band:
+            continue
+        base_level = float(lw_band[freq]) + float(weights[freq])
+        abar = max(0.0, float(abar_by_band.get(freq, 0.0))) if abar_by_band else 0.0
+        p_no_bar += 10.0 ** (base_level / 10.0)
+        p_with_bar += 10.0 ** ((base_level - abar) / 10.0)
+    if p_no_bar <= 0.0 or p_with_bar <= 0.0:
+        return 0.0
+    return max(0.0, float(10.0 * np.log10(p_no_bar / p_with_bar)))
+
+
 def compute_lpa_from_sources_grid(
     x_grid,
     y_grid,

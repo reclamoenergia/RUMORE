@@ -13,7 +13,9 @@ from ..core.iso9613_core import (
     build_source_spectrum,
     compute_adiv,
     compute_agr_iso9613_2_octave,
+    compute_agr_simplified,
     compute_lpa_from_sources_grid,
+    compute_barrier_attenuation_broadband,
     dz_iso_single_screen,
     reconstruct_lwa_total_from_unweighted,
 )
@@ -337,32 +339,13 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
 
         offsets = self._parse_offsets(offsets_text)
 
-        barriers = []
-        if barriers_source is not None:
-            if QgsWkbTypes.geometryType(barriers_source.wkbType()) != QgsWkbTypes.LineGeometry:
-                raise QgsProcessingException("Il layer barriere deve essere LineString/MultiLineString.")
-            barrier_transform = None
-            if barriers_source.sourceCrs().isValid() and barriers_source.sourceCrs() != dem_layer.crs():
-                barrier_transform = QgsCoordinateTransform(barriers_source.sourceCrs(), dem_layer.crs(), QgsProject.instance())
-            barrier_fields = barriers_source.fields()
-            h_idx = barrier_fields.lookupField(barrier_height_field) if barrier_height_field else -1
-            for feat in barriers_source.getFeatures():
-                geom = feat.geometry()
-                if geom is None or geom.isEmpty():
-                    continue
-                if barrier_transform is not None:
-                    geom = QgsGeometry(geom)
-                    geom.transform(barrier_transform)
-                if h_idx >= 0:
-                    raw_h = feat[h_idx]
-                    if raw_h in (None, ""):
-                        h_bar = barrier_height_default
-                        feedback.pushWarning(f"Barriera {feat.id()}: altezza mancante, uso default {barrier_height_default} m")
-                    else:
-                        h_bar = float(raw_h)
-                else:
-                    h_bar = barrier_height_default
-                barriers.append({"geom": geom, "h": max(0.0, h_bar)})
+        barriers = self._load_barriers(
+            barriers_source=barriers_source,
+            barrier_height_field=barrier_height_field,
+            barrier_height_default=barrier_height_default,
+            target_crs=dem_layer.crs(),
+            feedback=feedback,
+        )
 
         dem_path = dem_layer.source()
         dem_ds = gdal.Open(dem_path, gdal.GA_ReadOnly)
@@ -531,7 +514,7 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
                 y = gt[3] + (cc + 0.5) * gt[4] + (rr + 0.5) * gt[5]
 
                 z_r = dem_tile + h_rec
-                if barriers and use_bands:
+                if barriers:
                     lpa_tile = self._compute_tile_with_barriers(
                         x,
                         y,
@@ -542,6 +525,8 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
                         gt,
                         dem_nodata,
                         barriers,
+                        use_bands,
+                        alpha_atm,
                         enable_ground,
                         g_value,
                         d_min,
@@ -549,10 +534,9 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
                         relative_humidity,
                         pressure_kpa,
                         h_rec,
+                        feedback if done == 0 else None,
                     )
                 else:
-                    if barriers and not use_bands and done == 0:
-                        feedback.pushInfo("Barriere ignorate con USE_OCTAVE_BANDS=False (Abar=0).")
                     lpa_tile = compute_lpa_from_sources_grid(
                         x_grid=x,
                         y_grid=y,
@@ -597,6 +581,8 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
         gt,
         dem_nodata,
         barriers,
+        use_bands,
+        alpha_atm,
         enable_ground,
         g_value,
         d_min,
@@ -604,10 +590,14 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
         relative_humidity,
         pressure_kpa,
         h_rec,
+        feedback=None,
     ):
         out = np.full_like(x_grid, np.nan, dtype=np.float64)
         alpha_per_band = {freq: alpha_iso9613_1(freq, temperature_c, relative_humidity, pressure_kpa) for freq in BANDS}
         rows, cols = x_grid.shape
+        intersections_total = 0
+        barriers_applied = 0
+
         for r in range(rows):
             for c in range(cols):
                 if nodata_mask[r, c]:
@@ -617,42 +607,177 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
                 zr = float(z_rec[r, c])
                 p_tot = 0.0
                 for src in sources_spectra:
-                    x_s = float(src["x"])
-                    y_s = float(src["y"])
-                    z_s = float(src["z"])
-                    dxy = math.hypot(xr - x_s, yr - y_s)
-                    d = max(d_min, math.sqrt(dxy * dxy + (zr - z_s) * (zr - z_s)))
-                    adiv = float(compute_adiv(d))
-                    line = QgsGeometry.fromWkt(f"LINESTRING({x_s} {y_s}, {xr} {yr})")
-                    best = None
-                    for b in barriers:
-                        inter = line.intersection(b["geom"])
-                        if inter is None or inter.isEmpty():
-                            continue
-                        points = inter.asMultiPoint() if inter.isMultipart() else [inter.asPoint()]
-                        for p in points:
-                            z_ground = ISO9613LpaRasterAlgorithm._sample_dem_nearest(dem_band, gt, p.x(), p.y())
-                            if z_ground is None or ISO9613LpaRasterAlgorithm._is_nodata_value(z_ground, dem_nodata):
-                                continue
-                            z_edge = z_ground + b["h"]
-                            dss = math.sqrt((p.x() - x_s) ** 2 + (p.y() - y_s) ** 2 + (z_edge - z_s) ** 2)
-                            dsr = math.sqrt((xr - p.x()) ** 2 + (yr - p.y()) ** 2 + (zr - z_edge) ** 2)
-                            z_diff = max(0.0, dss + dsr - d)
-                            if best is None or z_diff > best["z"]:
-                                best = {"dss": dss, "dsr": dsr, "z": z_diff}
-                    for freq in BANDS:
-                        aatm = alpha_per_band[freq] * d
-                        h_src = float(src.get("h_src", 1.0))
-                        agr = compute_agr_iso9613_2_octave(freq, d, h_src, h_rec, g_value) if enable_ground else 0.0
-                        abar = 0.0
-                        if best is not None and best["z"] > 0.0:
-                            dz = dz_iso_single_screen(freq, best["dss"], best["dsr"], d, best["z"])
-                            abar = abar_from_dz(dz, agr)
-                        lp = float(src["lw_band"][freq]) - (adiv + aatm + agr + abar)
-                        p_tot += 10.0 ** ((lp + A_WEIGHT_DB[freq]) / 10.0)
+                    source_result = ISO9613LpaRasterAlgorithm._compute_source_contribution_with_barriers(
+                        src=src,
+                        x_r=xr,
+                        y_r=yr,
+                        z_r=zr,
+                        dem_band=dem_band,
+                        gt=gt,
+                        dem_nodata=dem_nodata,
+                        barriers=barriers,
+                        use_bands=use_bands,
+                        alpha_atm=alpha_atm,
+                        alpha_per_band=alpha_per_band,
+                        enable_ground=enable_ground,
+                        g_value=g_value,
+                        d_min=d_min,
+                        h_rec=h_rec,
+                    )
+                    p_tot += source_result["power"]
+                    intersections_total += source_result["intersections"]
+                    if source_result["barrier_applied"]:
+                        barriers_applied += 1
                 if p_tot > 0.0:
                     out[r, c] = 10.0 * math.log10(p_tot)
+
+        if feedback is not None:
+            feedback.pushInfo(f"Barriere caricate: {len(barriers)}")
+            feedback.pushInfo(f"Intersezioni sorgente-recettore/barriera valutate: {intersections_total}")
+            feedback.pushInfo(f"Contributi sorgente con attenuazione barriera applicata: {barriers_applied}")
+            if not use_bands:
+                feedback.pushInfo("USE_OCTAVE_BANDS=False: attenuazione barriera broadband derivata da attenuazioni per banda.")
         return out
+
+    @staticmethod
+    def _compute_source_contribution_with_barriers(
+        src,
+        x_r,
+        y_r,
+        z_r,
+        dem_band,
+        gt,
+        dem_nodata,
+        barriers,
+        use_bands,
+        alpha_atm,
+        alpha_per_band,
+        enable_ground,
+        g_value,
+        d_min,
+        h_rec,
+    ):
+        x_s = float(src["x"])
+        y_s = float(src["y"])
+        z_s = float(src["z"])
+        dxy = math.hypot(x_r - x_s, y_r - y_s)
+        d = max(d_min, math.sqrt(dxy * dxy + (z_r - z_s) * (z_r - z_s)))
+        adiv = float(compute_adiv(d))
+
+        best, intersection_count = ISO9613LpaRasterAlgorithm._best_barrier_profile(
+            x_s, y_s, z_s, x_r, y_r, z_r, d, dem_band, gt, dem_nodata, barriers
+        )
+
+        h_src = float(src.get("h_src", 1.0))
+        abar_by_band = {freq: 0.0 for freq in BANDS}
+        if best is not None and best["z"] > 0.0:
+            for freq in BANDS:
+                agr_band = compute_agr_iso9613_2_octave(freq, d, h_src, h_rec, g_value) if enable_ground else 0.0
+                dz = dz_iso_single_screen(freq, best["dss"], best["dsr"], d, best["z"])
+                abar_by_band[freq] = abar_from_dz(dz, agr_band)
+
+        power = 0.0
+        barrier_applied = False
+        if use_bands:
+            for freq in BANDS:
+                aatm = alpha_per_band[freq] * d
+                agr = compute_agr_iso9613_2_octave(freq, d, h_src, h_rec, g_value) if enable_ground else 0.0
+                abar = abar_by_band[freq]
+                if abar > 0.0:
+                    barrier_applied = True
+                lp = float(src["lw_band"][freq]) - (adiv + aatm + agr + abar)
+                power += 10.0 ** ((lp + A_WEIGHT_DB[freq]) / 10.0)
+        else:
+            aatm = alpha_atm * d
+            agr = compute_agr_simplified(enable_ground, g_value, d)
+            abar_bb = compute_barrier_attenuation_broadband(src.get("lw_band"), abar_by_band)
+            barrier_applied = abar_bb > 0.0
+            lp = float(src["lwa"]) - (adiv + aatm + agr + abar_bb)
+            power += 10.0 ** (lp / 10.0)
+
+        return {"power": power, "intersections": intersection_count, "barrier_applied": barrier_applied}
+
+    @staticmethod
+    def _best_barrier_profile(x_s, y_s, z_s, x_r, y_r, z_r, d, dem_band, gt, dem_nodata, barriers):
+        line = QgsGeometry.fromWkt(f"LINESTRING({x_s} {y_s}, {x_r} {y_r})")
+        best = None
+        intersections = 0
+        for barrier in barriers:
+            inter = line.intersection(barrier["geom"])
+            if inter is None or inter.isEmpty():
+                continue
+            for point in ISO9613LpaRasterAlgorithm._extract_intersection_points(inter):
+                intersections += 1
+                z_ground = ISO9613LpaRasterAlgorithm._sample_dem_nearest(dem_band, gt, point.x(), point.y())
+                if z_ground is None or ISO9613LpaRasterAlgorithm._is_nodata_value(z_ground, dem_nodata):
+                    continue
+                z_edge = z_ground + barrier["h"]
+                dss = math.sqrt((point.x() - x_s) ** 2 + (point.y() - y_s) ** 2 + (z_edge - z_s) ** 2)
+                dsr = math.sqrt((x_r - point.x()) ** 2 + (y_r - point.y()) ** 2 + (z_r - z_edge) ** 2)
+                z_diff = max(0.0, dss + dsr - d)
+                if best is None or z_diff > best["z"]:
+                    best = {"dss": dss, "dsr": dsr, "z": z_diff, "h": barrier["h"]}
+        return best, intersections
+
+    @staticmethod
+    def _extract_intersection_points(intersection_geom):
+        points = []
+        geom_type = QgsWkbTypes.geometryType(intersection_geom.wkbType())
+        if geom_type == QgsWkbTypes.PointGeometry:
+            if intersection_geom.isMultipart():
+                points.extend(intersection_geom.asMultiPoint())
+            else:
+                points.append(intersection_geom.asPoint())
+        elif geom_type == QgsWkbTypes.LineGeometry:
+            lines = intersection_geom.asMultiPolyline() if intersection_geom.isMultipart() else [intersection_geom.asPolyline()]
+            for line in lines:
+                if not line:
+                    continue
+                points.append(line[0])
+                points.append(line[-1])
+        return points
+
+    @staticmethod
+    def _load_barriers(barriers_source, barrier_height_field, barrier_height_default, target_crs, feedback):
+        barriers = []
+        if barriers_source is None:
+            return barriers
+        if QgsWkbTypes.geometryType(barriers_source.wkbType()) != QgsWkbTypes.LineGeometry:
+            raise QgsProcessingException("Il layer barriere deve essere LineString/MultiLineString.")
+
+        barrier_transform = None
+        if barriers_source.sourceCrs().isValid() and barriers_source.sourceCrs() != target_crs:
+            barrier_transform = QgsCoordinateTransform(barriers_source.sourceCrs(), target_crs, QgsProject.instance())
+
+        barrier_fields = barriers_source.fields()
+        h_idx = barrier_fields.lookupField(barrier_height_field) if barrier_height_field else -1
+        for feat in barriers_source.getFeatures():
+            geom = feat.geometry()
+            if geom is None or geom.isEmpty():
+                continue
+            if barrier_transform is not None:
+                geom = QgsGeometry(geom)
+                geom.transform(barrier_transform)
+            if not geom.isGeosValid():
+                geom = geom.makeValid()
+            if geom is None or geom.isEmpty():
+                continue
+
+            h_bar = barrier_height_default
+            if h_idx >= 0:
+                raw_h = feat[h_idx]
+                if raw_h in (None, ""):
+                    feedback.pushWarning(f"Barriera {feat.id()}: altezza mancante, uso default {barrier_height_default} m")
+                else:
+                    try:
+                        h_bar = float(raw_h)
+                    except (TypeError, ValueError):
+                        feedback.pushWarning(f"Barriera {feat.id()}: altezza non valida ({raw_h}), uso default {barrier_height_default} m")
+                        h_bar = barrier_height_default
+            barriers.append({"geom": geom, "h": max(0.0, h_bar)})
+
+        feedback.pushInfo(f"Barriere lineari valide caricate: {len(barriers)}")
+        return barriers
 
     @staticmethod
     def _sample_dem_nearest(dem_band, gt, x, y):
