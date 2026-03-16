@@ -48,6 +48,7 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
     FIELD_NAME = "FIELD_NAME"
     FIELD_HSRC = "FIELD_HSRC"
     FIELD_LWA = "FIELD_LWA"
+    BARRIERS_ENABLED = "BARRIERS_ENABLED"
     BARRIERS = "BARRIERS"
     BARRIER_HEIGHT_FIELD = "BARRIER_HEIGHT_FIELD"
     BARRIER_HEIGHT_DEFAULT = "BARRIER_HEIGHT_DEFAULT"
@@ -138,6 +139,13 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
                 "Campo LwA (dB re 1 pW)",
                 parentLayerParameterName=self.SOURCES,
                 type=QgsProcessingParameterField.Numeric,
+            )
+        )
+        self.addParameter(
+            QgsProcessingParameterBoolean(
+                self.BARRIERS_ENABLED,
+                "Abilita barriere",
+                defaultValue=False,
             )
         )
         self.addParameter(
@@ -292,6 +300,7 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
         field_name = self.parameterAsString(parameters, self.FIELD_NAME, context)
         field_hsrc = self.parameterAsString(parameters, self.FIELD_HSRC, context)
         field_lwa = self.parameterAsString(parameters, self.FIELD_LWA, context)
+        barriers_enabled = self.parameterAsBool(parameters, self.BARRIERS_ENABLED, context)
         barriers_source = self.parameterAsSource(parameters, self.BARRIERS, context)
         barrier_height_field = self.parameterAsString(parameters, self.BARRIER_HEIGHT_FIELD, context)
         barrier_height_default = self.parameterAsDouble(parameters, self.BARRIER_HEIGHT_DEFAULT, context)
@@ -339,13 +348,16 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
 
         offsets = self._parse_offsets(offsets_text)
 
-        barriers = self._load_barriers(
+        barriers, barriers_loaded_count = self._load_barriers(
+            barriers_enabled=barriers_enabled,
             barriers_source=barriers_source,
             barrier_height_field=barrier_height_field,
             barrier_height_default=barrier_height_default,
             target_crs=dem_layer.crs(),
             feedback=feedback,
         )
+        barriers_source_present = barriers_source is not None
+        barriers_active_in_model = barriers_enabled and barriers_source_present and barriers_loaded_count > 0
 
         dem_path = dem_layer.source()
         dem_ds = gdal.Open(dem_path, gdal.GA_ReadOnly)
@@ -408,6 +420,21 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
 
         if not all_sources:
             raise QgsProcessingException("Nessuna sorgente valida trovata.")
+
+        if not barriers_enabled:
+            feedback.pushInfo("Modalità barriere: DISATTIVATA (nessun layer selezionato o opzione non abilitata).")
+        else:
+            feedback.pushInfo("Modalità barriere: ATTIVATA.")
+            if not barriers_source_present:
+                feedback.pushWarning("Modalità barriere richiesta, ma nessun layer barriere è stato selezionato.")
+            else:
+                feedback.pushInfo(f"Layer barriere selezionato: {barriers_source.sourceName()}")
+                barrier_features_total = barriers_source.featureCount() if barriers_source is not None else 0
+                feedback.pushInfo(f"Feature presenti nel layer: {barrier_features_total}")
+                if barriers_loaded_count == 0:
+                    feedback.pushWarning("Layer barriere selezionato, ma nessuna barriera valida è stata caricata nel modello.")
+                else:
+                    feedback.pushInfo(f"Barriere effettivamente caricate nel modello: {barriers_loaded_count}")
 
         domain = self._compute_domain_bbox(all_sources, baf)
         domain = domain.intersect(dem_extent)
@@ -514,7 +541,7 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
                 y = gt[3] + (cc + 0.5) * gt[4] + (rr + 0.5) * gt[5]
 
                 z_r = dem_tile + h_rec
-                if barriers:
+                if barriers_active_in_model:
                     lpa_tile = self._compute_tile_with_barriers(
                         x,
                         y,
@@ -567,6 +594,11 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
         out_band.FlushCache()
         out_ds = None
         dem_ds = None
+
+        if barriers_active_in_model:
+            feedback.pushInfo("Calcolo eseguito con barriere attive.")
+        else:
+            feedback.pushInfo("Calcolo eseguito senza barriere.")
 
         return {self.OUTPUT: output_path}
 
@@ -738,12 +770,16 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
         return points
 
     @staticmethod
-    def _load_barriers(barriers_source, barrier_height_field, barrier_height_default, target_crs, feedback):
+    def _load_barriers(barriers_enabled, barriers_source, barrier_height_field, barrier_height_default, target_crs, feedback):
         barriers = []
+        if not barriers_enabled:
+            return barriers, 0
         if barriers_source is None:
-            return barriers
+            feedback.pushWarning("Modalità barriere attivata, ma nessun layer barriere selezionato.")
+            return barriers, 0
         if QgsWkbTypes.geometryType(barriers_source.wkbType()) != QgsWkbTypes.LineGeometry:
-            raise QgsProcessingException("Il layer barriere deve essere LineString/MultiLineString.")
+            feedback.pushWarning("Layer barriere incompatibile: geometria non lineare. Le barriere non verranno usate.")
+            return barriers, 0
 
         barrier_transform = None
         if barriers_source.sourceCrs().isValid() and barriers_source.sourceCrs() != target_crs:
@@ -777,7 +813,7 @@ class ISO9613LpaRasterAlgorithm(QgsProcessingAlgorithm):
             barriers.append({"geom": geom, "h": max(0.0, h_bar)})
 
         feedback.pushInfo(f"Barriere lineari valide caricate: {len(barriers)}")
-        return barriers
+        return barriers, len(barriers)
 
     @staticmethod
     def _sample_dem_nearest(dem_band, gt, x, y):
