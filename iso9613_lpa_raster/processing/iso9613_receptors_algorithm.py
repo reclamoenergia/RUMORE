@@ -51,6 +51,7 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
     FIELD_HSRC = "FIELD_HSRC"
     FIELD_LWA = "FIELD_LWA"
     RECEPTORS = "RECEPTORS"
+    BARRIERS_ENABLED = "BARRIERS_ENABLED"
     BARRIERS = "BARRIERS"
     BARRIER_HEIGHT_FIELD = "BARRIER_HEIGHT_FIELD"
     BARRIER_HEIGHT_DEFAULT = "BARRIER_HEIGHT_DEFAULT"
@@ -149,6 +150,7 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
             )
 
         self.addParameter(QgsProcessingParameterFeatureSource(self.RECEPTORS, "Ricettori puntuali", [QgsProcessing.TypeVectorPoint]))
+        self.addParameter(QgsProcessingParameterBoolean(self.BARRIERS_ENABLED, "Abilita barriere", defaultValue=False))
         self.addParameter(
             QgsProcessingParameterFeatureSource(
                 self.BARRIERS,
@@ -272,6 +274,7 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
         temperature_c = self.parameterAsDouble(parameters, self.TEMPERATURE_C, context)
         relative_humidity = self.parameterAsDouble(parameters, self.RELATIVE_HUMIDITY, context)
         pressure_kpa = self.parameterAsDouble(parameters, self.PRESSURE_KPA, context)
+        barriers_enabled = self.parameterAsBool(parameters, self.BARRIERS_ENABLED, context)
         barriers_source = self.parameterAsSource(parameters, self.BARRIERS, context)
         barrier_height_field = self.parameterAsString(parameters, self.BARRIER_HEIGHT_FIELD, context)
         barrier_height_default = self.parameterAsDouble(parameters, self.BARRIER_HEIGHT_DEFAULT, context)
@@ -296,13 +299,16 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
         if QgsWkbTypes.geometryType(rec_source.wkbType()) != QgsWkbTypes.PointGeometry:
             raise QgsProcessingException("Il layer ricettori deve essere Point.")
 
-        barriers = self._load_barriers(
+        barriers, barriers_loaded_count = self._load_barriers(
+            barriers_enabled=barriers_enabled,
             barriers_source=barriers_source,
             barrier_height_field=barrier_height_field,
             barrier_height_default=barrier_height_default,
             target_crs=dem_layer.crs(),
             feedback=feedback,
         )
+        barriers_source_present = barriers_source is not None
+        barriers_active_in_model = barriers_enabled and barriers_source_present and barriers_loaded_count > 0
 
         fields = src_source.fields()
         h_field = fields.lookupField(field_hsrc)
@@ -381,6 +387,21 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
         if not sources:
             raise QgsProcessingException("Nessuna sorgente valida trovata.")
 
+        if not barriers_enabled:
+            feedback.pushInfo("Modalità barriere: DISATTIVATA (nessun layer selezionato o opzione non abilitata).")
+        else:
+            feedback.pushInfo("Modalità barriere: ATTIVATA.")
+            if not barriers_source_present:
+                feedback.pushWarning("Modalità barriere richiesta, ma nessun layer barriere è stato selezionato.")
+            else:
+                feedback.pushInfo(f"Layer barriere selezionato: {barriers_source.sourceName()}")
+                barrier_features_total = barriers_source.featureCount() if barriers_source is not None else 0
+                feedback.pushInfo(f"Feature presenti nel layer: {barrier_features_total}")
+                if barriers_loaded_count == 0:
+                    feedback.pushWarning("Layer barriere selezionato, ma nessuna barriera valida è stata caricata nel modello.")
+                else:
+                    feedback.pushInfo(f"Barriere effettivamente caricate nel modello: {barriers_loaded_count}")
+
         if use_bands:
             feedback.pushInfo(
                 f"Mode bande: preset={self.SPECTRUM_MODES[spectrum_idx]}, "
@@ -437,7 +458,7 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
             else:
                 rec_xy = np.array([[rec_pt.x(), rec_pt.y()]], dtype=np.float64)
                 rec_z = np.array([z_rec_dem + h_rec], dtype=np.float64)
-                if barriers:
+                if barriers_active_in_model:
                     lpa_db = self._compute_lpa_with_barriers(
                         rec_pt,
                         float(rec_z[0]),
@@ -490,6 +511,10 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
         feedback.pushInfo(f"Ricettori totali: {total_rec}")
         feedback.pushInfo(f"Ricettori filtrati da BAF: {skipped_by_baf}")
         feedback.pushInfo(f"Ricettori con LpA_dB NULL (NoData): {nodata_receptors}")
+        if barriers_active_in_model:
+            feedback.pushInfo("Calcolo eseguito con barriere attive.")
+        else:
+            feedback.pushInfo("Calcolo eseguito senza barriere.")
 
         dem_ds = None
         return {self.OUTPUT: dest_id}
@@ -651,12 +676,16 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
         return points
 
     @staticmethod
-    def _load_barriers(barriers_source, barrier_height_field, barrier_height_default, target_crs, feedback):
+    def _load_barriers(barriers_enabled, barriers_source, barrier_height_field, barrier_height_default, target_crs, feedback):
         barriers = []
+        if not barriers_enabled:
+            return barriers, 0
         if barriers_source is None:
-            return barriers
+            feedback.pushWarning("Modalità barriere attivata, ma nessun layer barriere selezionato.")
+            return barriers, 0
         if QgsWkbTypes.geometryType(barriers_source.wkbType()) != QgsWkbTypes.LineGeometry:
-            raise QgsProcessingException("Il layer barriere deve essere LineString/MultiLineString.")
+            feedback.pushWarning("Layer barriere incompatibile: geometria non lineare. Le barriere non verranno usate.")
+            return barriers, 0
 
         barrier_transform = None
         if barriers_source.sourceCrs().isValid() and barriers_source.sourceCrs() != target_crs:
@@ -690,7 +719,7 @@ class ISO9613LpaReceptorsAlgorithm(QgsProcessingAlgorithm):
             barriers.append({"geom": geom, "h": max(0.0, h_bar)})
 
         feedback.pushInfo(f"Barriere lineari valide caricate: {len(barriers)}")
-        return barriers
+        return barriers, len(barriers)
 
     @staticmethod
     def _resolve_mode_key(idx):

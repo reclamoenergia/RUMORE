@@ -52,6 +52,10 @@ class ISO9613LpaRasterDialog(QDialog):
         self.barriers_combo.setFilters(QgsMapLayerProxyModel.LineLayer)
         layout.addRow("Barriere (opzionale)", self.barriers_combo)
 
+        self.chk_enable_barriers = QCheckBox("Abilita barriere")
+        self.chk_enable_barriers.setChecked(False)
+        layout.addRow("Modalità barriere", self.chk_enable_barriers)
+
         self.barrier_height_field = QgsFieldComboBox()
         self.barrier_height_field.setFilters(QgsFieldProxyModel.Numeric)
         layout.addRow("Campo altezza barriera", self.barrier_height_field)
@@ -69,6 +73,7 @@ class ISO9613LpaRasterDialog(QDialog):
 
         self.src_combo.layerChanged.connect(self._on_source_changed)
         self.barriers_combo.layerChanged.connect(self._on_barriers_changed)
+        self.chk_enable_barriers.toggled.connect(self._on_barriers_enabled_toggled)
 
         self.chk_use_selected_sources = QCheckBox("Usa solo sorgenti selezionate")
         self.chk_use_selected_sources.setChecked(False)
@@ -166,6 +171,7 @@ class ISO9613LpaRasterDialog(QDialog):
 
         self.use_bands.toggled.connect(self._on_use_bands_toggled)
         self._on_source_changed(self.src_combo.currentLayer())
+        self._on_barriers_enabled_toggled(self.chk_enable_barriers.isChecked())
         self._on_spectrum_mode_changed(self.spectrum_combo.currentIndex())
         self._on_use_bands_toggled(self.use_bands.isChecked())
 
@@ -184,6 +190,11 @@ class ISO9613LpaRasterDialog(QDialog):
 
     def _on_barriers_changed(self, layer):
         self.barrier_height_field.setLayer(layer)
+
+    def _on_barriers_enabled_toggled(self, enabled):
+        self.barriers_combo.setEnabled(enabled)
+        self.barrier_height_field.setEnabled(enabled)
+        self.barrier_height_default.setEnabled(enabled)
 
 
     def _on_spectrum_mode_changed(self, idx):
@@ -278,6 +289,9 @@ class ISO9613LpaRasterDialog(QDialog):
             return
 
         src_to_use = self._selected_sources_layer(src)
+        barriers_enabled = self.chk_enable_barriers.isChecked()
+        barriers_layer = self.barriers_combo.currentLayer() if barriers_enabled else None
+        barrier_height_field = self.barrier_height_field.currentField().strip() if barriers_enabled else None
 
         params = {
             "DEM": dem,
@@ -285,8 +299,9 @@ class ISO9613LpaRasterDialog(QDialog):
             "FIELD_NAME": None,
             "FIELD_HSRC": field_hsrc,
             "FIELD_LWA": field_lwa,
-            "BARRIERS": self.barriers_combo.currentLayer(),
-            "BARRIER_HEIGHT_FIELD": self.barrier_height_field.currentField().strip() or None,
+            "BARRIERS_ENABLED": barriers_enabled,
+            "BARRIERS": barriers_layer,
+            "BARRIER_HEIGHT_FIELD": barrier_height_field or None,
             "BARRIER_HEIGHT_DEFAULT": self.barrier_height_default.value(),
             "H_REC": self.h_rec.value(),
             "BAF": self.baf.value(),
@@ -330,8 +345,9 @@ class ISO9613LpaRasterDialog(QDialog):
                     "FIELD_NAME": None,
                     "FIELD_HSRC": field_hsrc,
                     "FIELD_LWA": field_lwa,
-                    "BARRIERS": self.barriers_combo.currentLayer(),
-                    "BARRIER_HEIGHT_FIELD": self.barrier_height_field.currentField().strip() or None,
+                    "BARRIERS_ENABLED": barriers_enabled,
+                    "BARRIERS": barriers_layer,
+                    "BARRIER_HEIGHT_FIELD": barrier_height_field or None,
                     "BARRIER_HEIGHT_DEFAULT": self.barrier_height_default.value(),
                     "RECEPTORS": receptors_layer,
                     "H_REC": self.h_rec.value(),
